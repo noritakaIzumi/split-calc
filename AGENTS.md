@@ -20,3 +20,14 @@ Example:
 ```text
 feat(cli): add monthly installment breakdown
 ```
+
+## Tests
+
+Run the complete test suite from the repository root with:
+
+```console
+uv run python -m unittest -v
+scripts/test-check-commit-message.sh
+```
+
+When asked to run the project tests, run both commands unless the request specifies a narrower scope.
