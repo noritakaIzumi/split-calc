@@ -85,7 +85,7 @@ CARD_PLANS: dict[str, CardPlan] = {
     "smbc": CardPlan(
         "三井住友カード",
         RATES,
-        "月別の元金・手数料は実質年率による概算です。実際の請求とは異なる場合があります。",
+        "定額分割方式（総額均等割）による表示です。繰り上げ返済時の精算額とは異なります。",
     ),
     "jcb": CardPlan(
         "JCB",
@@ -129,13 +129,21 @@ def simulate(
     )
     total = amount + total_fee
     regular_payment, first_remainder = divmod(total, installments)
+    regular_principal, first_principal_remainder = divmod(amount, installments)
 
     balance = amount
     allocated_fee = 0
     result: list[Payment] = []
     for number in range(1, installments + 1):
         payment_amount = regular_payment + (first_remainder if number == 1 else 0)
-        if number == installments:
+        if card == "smbc":
+            # 定額分割方式（総額均等割）。元金と確定済みの手数料を
+            # 支払回数で均等に分け、端数は初回へ加える。
+            principal = regular_principal + (
+                first_principal_remainder if number == 1 else 0
+            )
+            monthly_fee = payment_amount - principal
+        elif number == installments:
             monthly_fee = total_fee - allocated_fee
             principal = balance
             payment_amount = principal + monthly_fee

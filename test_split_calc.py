@@ -23,6 +23,15 @@ class SimulateTest(unittest.TestCase):
         self.assertEqual(sum(p.principal for p in payments), 10_001)
         self.assertEqual(payments[0].month, "2027-01")
 
+    def test_smbc_uses_equal_total_installments(self):
+        payments = simulate(122_970, 3, date(2026, 8, 1))
+
+        self.assertEqual(sum(p.fee for p in payments), 3_025)
+        self.assertEqual([p.amount for p in payments], [41_999, 41_998, 41_998])
+        self.assertEqual([p.principal for p in payments], [40_990, 40_990, 40_990])
+        self.assertEqual([p.fee for p in payments], [1_009, 1_008, 1_008])
+        self.assertEqual([p.balance for p in payments], [81_980, 40_990, 0])
+
     def test_rejects_amount_below_service_minimum(self):
         with self.assertRaisesRegex(ValueError, "1,000円以上"):
             simulate(999, 3)
