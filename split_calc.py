@@ -432,7 +432,7 @@ def main(argv: Sequence[str] | None = None) -> int:
                 input(
                     f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: "
                 ).strip()
-                or str(JCB_DEFAULT_ANNUAL_RATE)
+                or format(JCB_DEFAULT_ANNUAL_RATE, "f")
             )
 
         payments = simulate(
