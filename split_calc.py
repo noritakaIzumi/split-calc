@@ -374,13 +374,23 @@ def annual_rate_value(value: str) -> Decimal:
     return result
 
 
+def card_value(value: str) -> str:
+    if value not in CARD_PLANS:
+        choices = ", ".join(CARD_PLANS)
+        raise argparse.ArgumentTypeError(
+            f"カード会社は次から選んでください: {choices}"
+        )
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="あとから分割の月別支払額を計算します。")
     parser.add_argument("amount", nargs="?", type=positive_integer, help="利用金額（円）")
     parser.add_argument("installments", nargs="?", type=positive_integer, help="分割回数")
     parser.add_argument(
         "--card",
-        choices=CARD_PLANS,
+        type=card_value,
+        metavar="CARD",
         help="カード会社（省略時は対話入力、既定: smbc）",
     )
     parser.add_argument(
@@ -398,14 +408,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
-        card = args.card
-        if card is None:
-            card = input("カード会社（smbc/jcb） [smbc]: ").strip() or "smbc"
-            if card not in CARD_PLANS:
-                choices = ", ".join(CARD_PLANS)
-                raise argparse.ArgumentTypeError(
-                    f"カード会社は次から選んでください: {choices}"
-                )
+        card = args.card or card_value(
+            input("カード会社（smbc/jcb） [smbc]: ").strip() or "smbc"
+        )
 
         annual_rate = args.annual_rate
         if card == "jcb" and annual_rate is None:

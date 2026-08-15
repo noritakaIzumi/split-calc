@@ -175,6 +175,20 @@ class MainTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         simulate_mock.assert_called_once_with(10_000, 3, None, "smbc", None)
 
+    def test_rejects_unknown_interactive_card(self):
+        output = StringIO()
+        with (
+            patch("builtins.input", side_effect=["10000", "3", "unknown"]),
+            redirect_stdout(output),
+        ):
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(
+            output.getvalue(),
+            "エラー: カード会社は次から選んでください: smbc, jcb\n",
+        )
+
     def test_interactive_jcb_annual_rate_defaults_on_empty_input(self):
         with (
             patch("builtins.input", side_effect=["100000", "10", "jcb", ""]),
