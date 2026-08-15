@@ -712,12 +712,21 @@ def display_ljust(value: str, width: int) -> str:
     return value + " " * max(0, width - display_width(value))
 
 
+def visible_from_current_month(items: Sequence, include_past: bool = False) -> list:
+    """月属性を持つ項目から、既定では現在月以降だけを返す。"""
+    if include_past:
+        return list(items)
+    current_month = date.today().strftime("%Y-%m")
+    return [item for item in items if item.month >= current_month]
+
+
 def print_result(
     amount: int,
     installments: int,
     payments: Sequence[Payment],
     card: str = DEFAULT_CARD,
     annual_rate: Decimal | None = None,
+    include_past: bool = False,
 ) -> None:
     plan = CARD_PLANS[card]
     displayed_annual_rate = annual_rate
@@ -731,9 +740,10 @@ def print_result(
     print(f"手数料: {yen(total_fee)} / 支払総額: {yen(amount + total_fee)}\n")
 
     headers = ("回", "支払月", "支払金額", "元金", "手数料", "残元金")
+    displayed_payments = visible_from_current_month(payments, include_past)
     rows = [
         (str(p.number), p.month, yen(p.amount), yen(p.principal), yen(p.fee), yen(p.balance))
-        for p in payments
+        for p in displayed_payments
     ]
     widths = [
         max(display_width(headers[i]), *(display_width(row[i]) for row in rows))
@@ -779,6 +789,7 @@ def print_result_html(
     payments: Sequence[Payment],
     card: str = DEFAULT_CARD,
     annual_rate: Decimal | None = None,
+    include_past: bool = False,
 ) -> None:
     """分割払いの結果をHTML文書として出力する。"""
     plan = CARD_PLANS[card]
@@ -789,12 +800,13 @@ def print_result_html(
         displayed_annual_rate = plan.rates[installments].annual_rate
     total_fee = sum(item.fee for item in payments)
     title = f"{plan.name} あとから分割シミュレーション"
+    displayed_payments = visible_from_current_month(payments, include_past)
     rows = "\n".join(
         "    <tr>"
         f"<td>{payment.number}</td><td>{html.escape(payment.month)}</td>"
         f"<td>{yen(payment.amount)}</td><td>{yen(payment.principal)}</td>"
         f"<td>{yen(payment.fee)}</td><td>{yen(payment.balance)}</td></tr>"
-        for payment in payments
+        for payment in displayed_payments
     )
     body = f"""  <main>
     <h1>{html.escape(title)}</h1>
@@ -895,6 +907,7 @@ def print_optimization(
     result: OptimizationResult,
     monthly_saving: int,
     fixed_monthly_total: bool = False,
+    include_past: bool = False,
 ) -> None:
     print("\n繰り上げ返済の最適化（概算）")
     label = "毎月の返済・積立合計額" if fixed_monthly_total else "毎月の積立額"
@@ -906,7 +919,10 @@ def print_optimization(
         f"手数料: {yen(result.baseline_fee)} → {yen(result.optimized_fee)} "
         f"（{yen(result.saved_fee)}削減）"
     )
-    if result.saving_entries:
+    displayed_entries = visible_from_current_month(
+        result.saving_entries, include_past
+    )
+    if displayed_entries:
         headers = (
             "回",
             "月",
@@ -928,7 +944,7 @@ def print_optimization(
                 yen(entry.withdrawal) if entry.withdrawal else "*",
                 yen(entry.balance),
             )
-            for entry in result.saving_entries
+            for entry in displayed_entries
         ]
         widths = [
             max(display_width(headers[i]), *(display_width(row[i]) for row in rows))
@@ -969,6 +985,7 @@ def print_optimization_html(
     result: OptimizationResult,
     monthly_saving: int,
     fixed_monthly_total: bool = False,
+    include_past: bool = False,
 ) -> None:
     """繰り上げ返済の最適化結果をHTML文書として出力する。"""
     title = "繰り上げ返済の最適化（概算）"
@@ -977,6 +994,9 @@ def print_optimization_html(
         f"<span>積立開始月: {html.escape(result.saving_start_month)}</span>"
         if result.saving_start_month is not None
         else ""
+    )
+    displayed_entries = visible_from_current_month(
+        result.saving_entries, include_past
     )
     rows = "\n".join(
         "    <tr>"
@@ -987,10 +1007,10 @@ def print_optimization_html(
         f"<td>{yen(entry.deposit) if entry.deposit else '—'}</td>"
         f"<td>{yen(entry.withdrawal) if entry.withdrawal else '—'}</td>"
         f"<td>{yen(entry.balance)}</td></tr>"
-        for entry in result.saving_entries
+        for entry in displayed_entries
     )
     table = ""
-    if result.saving_entries:
+    if displayed_entries:
         table = f"""    <table class="optimization">
       <thead><tr><th>回</th><th>月</th><th>摘要</th><th>返済</th><th>積立</th><th>繰上返済</th><th>積立残高</th></tr></thead>
       <tbody>
@@ -1240,11 +1260,17 @@ def build_parser() -> argparse.ArgumentParser:
         default="text",
         help="出力形式（既定: text）",
     )
+    parser.add_argument(
+        "--include-past",
+        action="store_true",
+        help="現在月より前の支払い・積立履歴も出力する",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
+    display_options = {"include_past": True} if args.include_past else {}
     try:
         if args.optimize:
             if any(
@@ -1268,18 +1294,20 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 if args.format == "html":
                     print_optimization_html(
-                        result, monthly_saving, fixed_monthly_total=True
+                        result, monthly_saving, fixed_monthly_total=True,
+                        **display_options,
                     )
                 else:
                     print_optimization(
-                        result, monthly_saving, fixed_monthly_total=True
+                        result, monthly_saving, fixed_monthly_total=True,
+                        **display_options,
                     )
             else:
                 result = optimize_payoffs(plans, monthly_saving, saving_start)
                 if args.format == "html":
-                    print_optimization_html(result, monthly_saving)
+                    print_optimization_html(result, monthly_saving, **display_options)
                 else:
-                    print_optimization(result, monthly_saving)
+                    print_optimization(result, monthly_saving, **display_options)
             return 0
         if args.payment:
             if args.monthly_saving is None:
@@ -1306,20 +1334,24 @@ def main(argv: Sequence[str] | None = None) -> int:
                 )
                 if args.format == "html":
                     print_optimization_html(
-                        result, args.monthly_saving, fixed_monthly_total=True
+                        result, args.monthly_saving, fixed_monthly_total=True,
+                        **display_options,
                     )
                 else:
                     print_optimization(
-                        result, args.monthly_saving, fixed_monthly_total=True
+                        result, args.monthly_saving, fixed_monthly_total=True,
+                        **display_options,
                     )
             else:
                 result = optimize_payoffs(
                     args.payment, args.monthly_saving, args.saving_start
                 )
                 if args.format == "html":
-                    print_optimization_html(result, args.monthly_saving)
+                    print_optimization_html(
+                        result, args.monthly_saving, **display_options
+                    )
                 else:
-                    print_optimization(result, args.monthly_saving)
+                    print_optimization(result, args.monthly_saving, **display_options)
             return 0
         if (
             args.monthly_saving is not None
@@ -1364,9 +1396,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"エラー: {error}")
         return 2
     if args.format == "html":
-        print_result_html(amount, installments, payments, card, annual_rate)
+        print_result_html(
+            amount, installments, payments, card, annual_rate, **display_options
+        )
     else:
-        print_result(amount, installments, payments, card, annual_rate)
+        print_result(
+            amount, installments, payments, card, annual_rate, **display_options
+        )
     return 0
 
 

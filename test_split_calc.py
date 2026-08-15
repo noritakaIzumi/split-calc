@@ -356,6 +356,40 @@ class OptimizePayoffsTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_optimization_output_omits_months_before_current_month_by_default(self):
+        result = OptimizationResult(
+            ("家電",),
+            1_000,
+            500,
+            (),
+            (
+                SavingEntry(1, "2000-01", "過去の積立", 10_000, 0, 10_000),
+                SavingEntry(2, "2999-01", "将来の積立", 10_000, 0, 20_000),
+            ),
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_optimization(result, 10_000)
+
+        self.assertNotIn("過去の積立", output.getvalue())
+        self.assertIn("将来の積立", output.getvalue())
+
+    def test_include_past_outputs_all_optimization_months(self):
+        result = OptimizationResult(
+            ("家電",),
+            1_000,
+            500,
+            (),
+            (SavingEntry(1, "2000-01", "過去の積立", 10_000, 0, 10_000),),
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_optimization(result, 10_000, include_past=True)
+
+        self.assertIn("過去の積立", output.getvalue())
+
     def test_prints_simulation_as_complete_html_document(self):
         payments = simulate(10_000, 3, date(2026, 8, 1))
         output = StringIO()
