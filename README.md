@@ -2,16 +2,26 @@
 
 三井住友カードの「あとから分割」について、利用金額と分割回数から毎月の支払金額・元金・手数料・残元金を表示する Python CLI です。外部パッケージは使いません。
 
+## 環境構築
+
+Python 3.12と[uv](https://docs.astral.sh/uv/)を使用します。uvをインストールしたうえで、リポジトリのルートで環境を同期してください。
+
+```console
+uv sync
+```
+
+uvは `.python-version` に指定したPython 3.12を選択し、必要に応じてPython本体を取得して `.venv` を作成します。生成される `.venv` はGitの管理対象外です。
+
 ## 使い方
 
 ```console
-python split_calc.py 60000 3
+uv run split_calc.py 60000 3
 ```
 
 引数を省略すると対話形式で入力できます。
 
 ```console
-python split_calc.py
+uv run split_calc.py
 支払金額（円）: 60000
 分割回数: 3
 ```
@@ -19,7 +29,7 @@ python split_calc.py
 申込月を指定する場合は `--start YYYY-MM` を使います。第1回はその翌月として表示されます。
 
 ```console
-python split_calc.py 60000 3 --start 2026-08
+uv run split_calc.py 60000 3 --start 2026-08
 ```
 
 対応回数は `3, 4, 5, 6, 10, 12, 15, 18, 20, 24, 30, 36, 40, 42, 48, 50, 54, 60` 回、利用金額は1,000円以上です。
@@ -38,5 +48,5 @@ python split_calc.py 60000 3 --start 2026-08
 ## テスト
 
 ```console
-python -m unittest -v
+uv run python -m unittest -v
 ```

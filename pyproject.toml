@@ -1,0 +1,10 @@
+[project]
+name = "split-calc"
+version = "0.1.0"
+description = "三井住友カードのあとから分割シミュレーター"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = []
+
+[dependency-groups]
+dev = []
