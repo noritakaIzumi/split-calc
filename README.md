@@ -12,6 +12,14 @@ uv sync
 
 uvは `.python-version` に指定したPython 3.12を選択し、必要に応じてPython本体を取得して `.venv` を作成します。生成される `.venv` はGitの管理対象外です。
 
+コミットメッセージの検査を有効にするため、初回のみpre-commitの`commit-msg`フックをインストールしてください。
+
+```console
+uvx pre-commit install --hook-type commit-msg
+```
+
+以後のコミットでは、`feat(cli): add monthly installment breakdown`のようなConventional Commits形式が必須になります。使用できるtypeは`feat`, `fix`, `docs`, `test`, `refactor`, `perf`, `build`, `ci`, `chore`, `style`, `revert`です。破壊的変更ではsubjectの`!`と`BREAKING CHANGE:` footerの両方が必要です。
+
 ## 使い方
 
 ```console
@@ -80,4 +88,5 @@ JCBの手数料率はカードの種類により異なります。本ツール�
 
 ```console
 uv run python -m unittest -v
+scripts/test-check-commit-message.sh
 ```
