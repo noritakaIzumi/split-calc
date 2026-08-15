@@ -5,7 +5,7 @@ from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
-from split_calc import CARD_PLANS, main, simulate
+from split_calc import CARD_PLANS, display_width, main, print_result, simulate
 
 
 class SimulateTest(unittest.TestCase):
@@ -106,6 +106,19 @@ class SimulateTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_result_columns_have_equal_display_widths(self):
+        payments = simulate(650_000, 60, date(2026, 8, 1))
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_result(650_000, 60, payments)
+
+        lines = output.getvalue().splitlines()
+        header, separator, first_row = lines[5:8]
+        table_width = display_width(separator)
+        self.assertEqual(display_width(header), table_width)
+        self.assertEqual(display_width(first_row), table_width)
+
     def test_card_and_jcb_annual_rate_can_be_entered_interactively(self):
         output = StringIO()
         with (

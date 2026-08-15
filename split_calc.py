@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import unicodedata
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -269,6 +270,23 @@ def yen(value: int) -> str:
     return f"{value:,}円"
 
 
+def display_width(value: str) -> int:
+    """端末に表示したときの文字列の幅を返す。"""
+    return sum(
+        0
+        if unicodedata.combining(character)
+        else 2
+        if unicodedata.east_asian_width(character) in {"F", "W"}
+        else 1
+        for character in value
+    )
+
+
+def display_rjust(value: str, width: int) -> str:
+    """全角文字の表示幅を考慮して文字列を右寄せする。"""
+    return " " * max(0, width - display_width(value)) + value
+
+
 def print_result(
     amount: int,
     installments: int,
@@ -288,11 +306,14 @@ def print_result(
         (str(p.number), p.month, yen(p.amount), yen(p.principal), yen(p.fee), yen(p.balance))
         for p in payments
     ]
-    widths = [max(len(headers[i]), *(len(row[i]) for row in rows)) for i in range(len(headers))]
-    print("  ".join(headers[i].rjust(widths[i]) for i in range(len(headers))))
+    widths = [
+        max(display_width(headers[i]), *(display_width(row[i]) for row in rows))
+        for i in range(len(headers))
+    ]
+    print("  ".join(display_rjust(headers[i], widths[i]) for i in range(len(headers))))
     print("  ".join("-" * width for width in widths))
     for row in rows:
-        print("  ".join(row[i].rjust(widths[i]) for i in range(len(row))))
+        print("  ".join(display_rjust(row[i], widths[i]) for i in range(len(row))))
     print(f"\n※{plan.note}")
 
 
