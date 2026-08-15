@@ -18,13 +18,13 @@ uvは `.python-version` に指定したPython 3.12を選択し、必要に応じ
 uv run split_calc.py 60000 3
 ```
 
-カード会社は `--card` で指定します。省略時は三井住友カード（`smbc`）です。
+カード会社は `--card` で指定します。省略時は対話形式で入力でき、空のままEnterを押すと三井住友カード（`smbc`）になります。
 
 ```console
 uv run split_calc.py 100000 10 --card jcb
 ```
 
-JCBの実質年率は既定で15.00%です。カードに適用される年率を指定する場合は `--annual-rate` を使います。
+JCBの実質年率は既定で15.00%です。カードに適用される年率を指定する場合は `--annual-rate` を使います。JCBを対話形式で選び、`--annual-rate` を省略した場合は年率も対話形式で入力できます。
 
 ```console
 uv run split_calc.py 100000 10 --card jcb --annual-rate 18.00
@@ -36,6 +36,17 @@ uv run split_calc.py 100000 10 --card jcb --annual-rate 18.00
 uv run split_calc.py
 支払金額（円）: 60000
 分割回数: 3
+カード会社（smbc/jcb） [smbc]:
+```
+
+JCBと年率を対話形式で指定する例です。
+
+```console
+uv run split_calc.py
+支払金額（円）: 100000
+分割回数: 10
+カード会社（smbc/jcb） [smbc]: jcb
+実質年率（%） [15.00]: 18.00
 ```
 
 対話入力は `Ctrl+C` で中断できます。

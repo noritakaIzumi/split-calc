@@ -331,8 +331,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--card",
         choices=CARD_PLANS,
-        default="smbc",
-        help="カード会社（既定: smbc）",
+        help="カード会社（省略時は対話入力、既定: smbc）",
     )
     parser.add_argument(
         "--annual-rate",
@@ -349,12 +348,29 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
+        card = args.card
+        if card is None:
+            card = input("カード会社（smbc/jcb） [smbc]: ").strip() or "smbc"
+            if card not in CARD_PLANS:
+                choices = ", ".join(CARD_PLANS)
+                raise argparse.ArgumentTypeError(
+                    f"カード会社は次から選んでください: {choices}"
+                )
+
+        annual_rate = args.annual_rate
+        if card == "jcb" and annual_rate is None:
+            rate_text = input(
+                f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: "
+            ).strip()
+            if rate_text:
+                annual_rate = annual_rate_value(rate_text)
+
         payments = simulate(
             amount,
             installments,
             args.start,
-            args.card,
-            args.annual_rate,
+            card,
+            annual_rate,
         )
     except KeyboardInterrupt:
         print("\n中断しました。")
@@ -365,7 +381,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(f"エラー: {error}")
         return 2
-    print_result(amount, installments, payments, args.card, args.annual_rate)
+    print_result(amount, installments, payments, card, annual_rate)
     return 0
 
 

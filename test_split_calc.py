@@ -106,6 +106,49 @@ class SimulateTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_card_and_jcb_annual_rate_can_be_entered_interactively(self):
+        output = StringIO()
+        with (
+            patch(
+                "builtins.input",
+                side_effect=["100000", "10", "jcb", "18.00"],
+            ),
+            patch("split_calc.simulate", return_value=[]) as simulate_mock,
+            patch("split_calc.print_result") as print_result_mock,
+            redirect_stdout(output),
+        ):
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        simulate_mock.assert_called_once_with(
+            100_000, 10, None, "jcb", Decimal("18.00")
+        )
+        print_result_mock.assert_called_once_with(
+            100_000, 10, [], "jcb", Decimal("18.00")
+        )
+
+    def test_interactive_card_defaults_to_smbc_on_empty_input(self):
+        with (
+            patch("builtins.input", side_effect=["10000", "3", ""]),
+            patch("split_calc.simulate", return_value=[]) as simulate_mock,
+            patch("split_calc.print_result"),
+        ):
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        simulate_mock.assert_called_once_with(10_000, 3, None, "smbc", None)
+
+    def test_interactive_jcb_annual_rate_defaults_on_empty_input(self):
+        with (
+            patch("builtins.input", side_effect=["100000", "10", "jcb", ""]),
+            patch("split_calc.simulate", return_value=[]) as simulate_mock,
+            patch("split_calc.print_result"),
+        ):
+            exit_code = main([])
+
+        self.assertEqual(exit_code, 0)
+        simulate_mock.assert_called_once_with(100_000, 10, None, "jcb", None)
+
     def test_keyboard_interrupt_exits_without_traceback(self):
         output = StringIO()
         with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stdout(output):
