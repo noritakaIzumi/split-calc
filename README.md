@@ -38,6 +38,8 @@ uv run split_calc.py
 分割回数: 3
 ```
 
+対話入力は `Ctrl+C` で中断できます。
+
 申込月を指定する場合は `--start YYYY-MM` を使います。第1回はその翌月として表示されます。
 
 ```console

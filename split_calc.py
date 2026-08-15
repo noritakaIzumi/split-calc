@@ -356,6 +356,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             args.card,
             args.annual_rate,
         )
+    except KeyboardInterrupt:
+        print("\n中断しました。")
+        return 130
+    except EOFError:
+        print("\nエラー: 入力が終了しました。")
+        return 2
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(f"エラー: {error}")
         return 2

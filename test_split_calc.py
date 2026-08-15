@@ -1,8 +1,11 @@
 import unittest
+from contextlib import redirect_stdout
 from datetime import date
 from decimal import Decimal
+from io import StringIO
+from unittest.mock import patch
 
-from split_calc import CARD_PLANS, simulate
+from split_calc import CARD_PLANS, main, simulate
 
 
 class SimulateTest(unittest.TestCase):
@@ -100,6 +103,24 @@ class SimulateTest(unittest.TestCase):
     def test_rejects_annual_rate_for_smbc(self):
         with self.assertRaisesRegex(ValueError, "JCBでのみ"):
             simulate(100_000, 10, annual_rate=Decimal("15.00"))
+
+
+class MainTest(unittest.TestCase):
+    def test_keyboard_interrupt_exits_without_traceback(self):
+        output = StringIO()
+        with patch("builtins.input", side_effect=KeyboardInterrupt), redirect_stdout(output):
+            exit_code = main(["--card", "jcb"])
+
+        self.assertEqual(exit_code, 130)
+        self.assertEqual(output.getvalue(), "\n中断しました。\n")
+
+    def test_end_of_input_returns_input_error(self):
+        output = StringIO()
+        with patch("builtins.input", side_effect=EOFError), redirect_stdout(output):
+            exit_code = main(["--card", "jcb"])
+
+        self.assertEqual(exit_code, 2)
+        self.assertEqual(output.getvalue(), "\nエラー: 入力が終了しました。\n")
 
 
 if __name__ == "__main__":
