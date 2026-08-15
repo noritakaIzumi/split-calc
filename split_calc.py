@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""三井住友カード「あとから分割」の月別支払いシミュレーター。"""
+"""クレジットカードの「あとから分割」月別支払いシミュレーター。"""
 
 from __future__ import annotations
 
@@ -27,6 +27,13 @@ class Payment:
     balance: int
 
 
+@dataclass(frozen=True)
+class CardPlan:
+    name: str
+    rates: dict[int, Rate]
+    note: str
+
+
 # 2025年4月1日改定後の三井住友カード「あとから分割」手数料率。
 RATES: dict[int, Rate] = {
     3: Rate(Decimal("14.70"), Decimal("2.46")),
@@ -50,6 +57,44 @@ RATES: dict[int, Rate] = {
 }
 
 
+JCB_INSTALLMENTS = (*range(3, 25), 30, 36, 42, 48, 54, 60)
+
+
+def installment_coefficient(annual_rate: Decimal, installments: int) -> Decimal:
+    """元利均等払いの割賦係数を小数点以下2桁で返す。"""
+    monthly_rate = annual_rate / Decimal(1200)
+    coefficient = (
+        Decimal(installments)
+        * monthly_rate
+        / (Decimal(1) - (Decimal(1) + monthly_rate) ** -installments)
+        - Decimal(1)
+    ) * Decimal(100)
+    return coefficient.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+
+
+# JCBが掲載する実質年率18.00%の場合の割賦係数。初回の日割計算前の上限目安。
+JCB_RATES: dict[int, Rate] = {
+    installments: Rate(
+        Decimal("18.00"),
+        installment_coefficient(Decimal("18.00"), installments),
+    )
+    for installments in JCB_INSTALLMENTS
+}
+
+CARD_PLANS: dict[str, CardPlan] = {
+    "smbc": CardPlan(
+        "三井住友カード",
+        RATES,
+        "月別の元金・手数料は実質年率による概算です。実際の請求とは異なる場合があります。",
+    ),
+    "jcb": CardPlan(
+        "JCB",
+        JCB_RATES,
+        "年率18.00%の割賦係数による上限目安です。初回の日割計算などにより実際の請求とは異なります。",
+    ),
+}
+
+
 def add_months(value: date, months: int) -> date:
     month_index = value.year * 12 + value.month - 1 + months
     year, month_zero_based = divmod(month_index, 12)
@@ -57,16 +102,26 @@ def add_months(value: date, months: int) -> date:
     return date(year, month, min(value.day, calendar.monthrange(year, month)[1]))
 
 
-def simulate(amount: int, installments: int, start_month: date | None = None) -> list[Payment]:
+def simulate(
+    amount: int,
+    installments: int,
+    start_month: date | None = None,
+    card: str = "smbc",
+) -> list[Payment]:
     """月別支払予定を返す。start_month の翌月を第1回支払月とする。"""
     if amount < 1_000:
         raise ValueError("支払金額は1,000円以上で入力してください。")
-    if installments not in RATES:
-        choices = ", ".join(str(value) for value in RATES)
+    try:
+        plan = CARD_PLANS[card]
+    except KeyError as error:
+        choices = ", ".join(CARD_PLANS)
+        raise ValueError(f"カード会社は次から選んでください: {choices}") from error
+    if installments not in plan.rates:
+        choices = ", ".join(str(value) for value in plan.rates)
         raise ValueError(f"分割回数は次から選んでください: {choices}")
 
     start_month = start_month or date.today().replace(day=1)
-    rate = RATES[installments]
+    rate = plan.rates[installments]
     total_fee = int(
         (Decimal(amount) * rate.fee_per_100_yen / Decimal(100)).quantize(
             Decimal("1"), rounding=ROUND_DOWN
@@ -114,10 +169,16 @@ def yen(value: int) -> str:
     return f"{value:,}円"
 
 
-def print_result(amount: int, installments: int, payments: Sequence[Payment]) -> None:
-    rate = RATES[installments]
+def print_result(
+    amount: int,
+    installments: int,
+    payments: Sequence[Payment],
+    card: str = "smbc",
+) -> None:
+    plan = CARD_PLANS[card]
+    rate = plan.rates[installments]
     total_fee = sum(item.fee for item in payments)
-    print("\n三井住友カード あとから分割シミュレーション")
+    print(f"\n{plan.name} あとから分割シミュレーション")
     print(f"利用金額: {yen(amount)} / {installments}回 / 実質年率: {rate.annual_rate}%")
     print(f"手数料: {yen(total_fee)} / 支払総額: {yen(amount + total_fee)}\n")
 
@@ -131,7 +192,7 @@ def print_result(amount: int, installments: int, payments: Sequence[Payment]) ->
     print("  ".join("-" * width for width in widths))
     for row in rows:
         print("  ".join(row[i].rjust(widths[i]) for i in range(len(row))))
-    print("\n※月別の元金・手数料は実質年率による概算です。実際の請求とは異なる場合があります。")
+    print(f"\n※{plan.note}")
 
 
 def positive_integer(value: str) -> int:
@@ -156,6 +217,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="あとから分割の月別支払額を計算します。")
     parser.add_argument("amount", nargs="?", type=positive_integer, help="利用金額（円）")
     parser.add_argument("installments", nargs="?", type=positive_integer, help="分割回数")
+    parser.add_argument(
+        "--card",
+        choices=CARD_PLANS,
+        default="smbc",
+        help="カード会社（既定: smbc）",
+    )
     parser.add_argument("--start", type=parse_month, metavar="YYYY-MM", help="申込月（省略時は今月）")
     return parser
 
@@ -165,11 +232,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
-        payments = simulate(amount, installments, args.start)
+        payments = simulate(amount, installments, args.start, args.card)
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(f"エラー: {error}")
         return 2
-    print_result(amount, installments, payments)
+    print_result(amount, installments, payments, args.card)
     return 0
 
 

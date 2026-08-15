@@ -1,7 +1,7 @@
 import unittest
 from datetime import date
 
-from split_calc import simulate
+from split_calc import CARD_PLANS, simulate
 
 
 class SimulateTest(unittest.TestCase):
@@ -30,6 +30,25 @@ class SimulateTest(unittest.TestCase):
     def test_rejects_unsupported_installment_count(self):
         with self.assertRaisesRegex(ValueError, "分割回数"):
             simulate(10_000, 7)
+
+    def test_jcb_official_fee_upper_estimate(self):
+        payments = simulate(100_000, 10, date(2026, 8, 1), "jcb")
+
+        self.assertEqual(sum(p.amount for p in payments), 108_430)
+        self.assertEqual(sum(p.principal for p in payments), 100_000)
+        self.assertEqual(sum(p.fee for p in payments), 8_430)
+        self.assertEqual([p.amount for p in payments], [10_843] * 10)
+        self.assertEqual(payments[-1].balance, 0)
+
+    def test_jcb_supports_each_installment_from_three_through_twenty_four(self):
+        self.assertEqual(
+            tuple(CARD_PLANS["jcb"].rates),
+            (*range(3, 25), 30, 36, 42, 48, 54, 60),
+        )
+
+    def test_rejects_unknown_card(self):
+        with self.assertRaisesRegex(ValueError, "カード会社"):
+            simulate(10_000, 3, card="unknown")
 
 
 if __name__ == "__main__":
