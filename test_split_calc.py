@@ -40,14 +40,36 @@ class SimulateTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "分割回数"):
             simulate(10_000, 7)
 
-    def test_jcb_official_fee_upper_estimate(self):
+    def test_jcb_official_ten_installment_example(self):
         payments = simulate(100_000, 10, date(2026, 8, 1), "jcb")
 
-        self.assertEqual(sum(p.amount for p in payments), 108_430)
+        self.assertEqual(sum(p.amount for p in payments), 108_211)
         self.assertEqual(sum(p.principal for p in payments), 100_000)
-        self.assertEqual(sum(p.fee for p in payments), 8_430)
-        self.assertEqual([p.amount for p in payments], [10_843] * 10)
+        self.assertEqual(sum(p.fee for p in payments), 8_211)
+        self.assertEqual(payments[0].amount, 10_625)
+        self.assertEqual([p.amount for p in payments[1:9]], [10_843] * 8)
+        self.assertEqual(payments[-1].amount, 10_842)
         self.assertEqual(payments[-1].balance, 0)
+
+    def test_jcb_sixty_installment_actual_schedule(self):
+        payments = simulate(502_700, 60, date(2026, 8, 1), "jcb")
+
+        self.assertEqual(
+            [(p.amount, p.fee, p.balance) for p in payments[:11]],
+            [
+                (11_669, 6_445, 497_476),
+                (12_764, 7_462, 492_174),
+                (12_764, 7_382, 486_792),
+                (12_764, 7_301, 481_329),
+                (12_764, 7_219, 475_784),
+                (12_764, 7_136, 470_156),
+                (12_764, 7_052, 464_444),
+                (12_764, 6_966, 458_646),
+                (12_764, 6_879, 452_761),
+                (12_764, 6_791, 446_788),
+                (12_764, 6_701, 440_725),
+            ],
+        )
 
     def test_jcb_supports_each_installment_from_three_through_twenty_four(self):
         self.assertEqual(
