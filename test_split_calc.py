@@ -22,7 +22,9 @@ from split_calc import (
     optimize_payoffs,
     payment_plan_value,
     print_optimization,
+    print_optimization_html,
     print_result,
+    print_result_html,
     simulate,
 )
 
@@ -354,6 +356,52 @@ class OptimizePayoffsTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_prints_simulation_as_complete_html_document(self):
+        payments = simulate(10_000, 3, date(2026, 8, 1))
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_result_html(10_000, 3, payments)
+
+        document = output.getvalue()
+        self.assertTrue(document.startswith("<!doctype html>"))
+        self.assertIn('<html lang="ja">', document)
+        self.assertIn("<td>3,416円</td>", document)
+        self.assertIn("支払総額: 10,246円", document)
+
+    def test_html_escapes_optimization_payment_names(self):
+        result = OptimizationResult(
+            ("<家電>",),
+            1_000,
+            500,
+            (),
+            (SavingEntry(1, "2026-09", "積立<&>", 10_000, 0, 10_000),),
+            "2026-09",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_optimization_html(result, 10_000)
+
+        document = output.getvalue()
+        self.assertIn("&lt;家電&gt;", document)
+        self.assertIn("積立&lt;&amp;&gt;", document)
+        self.assertNotIn("<家電>", document)
+
+    def test_html_format_is_used_by_main(self):
+        schedule = [Payment(1, "2026-09", 10_246, 10_000, 246, 0)]
+
+        with (
+            patch("split_calc.simulate", return_value=schedule),
+            patch("split_calc.print_result_html") as html_mock,
+            patch("split_calc.print_result") as text_mock,
+        ):
+            exit_code = main(["10000", "3", "--card", "smbc", "--format", "html"])
+
+        self.assertEqual(exit_code, 0)
+        html_mock.assert_called_once_with(10_000, 3, schedule, "smbc", None)
+        text_mock.assert_not_called()
+
     def test_fixed_monthly_total_option_is_passed_to_optimizer(self):
         result = OptimizationResult(("家電",), 1_000, 500, ())
 
