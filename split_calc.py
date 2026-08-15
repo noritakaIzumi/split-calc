@@ -37,7 +37,7 @@ class CardPlan:
 
 
 # 2025年4月1日改定後の三井住友カード「あとから分割」手数料率。
-RATES: dict[int, Rate] = {
+SMBC_RATES: dict[int, Rate] = {
     3: Rate(Decimal("14.70"), Decimal("2.46")),
     4: Rate(Decimal("15.64"), Decimal("3.28")),
     5: Rate(Decimal("16.25"), Decimal("4.10")),
@@ -59,7 +59,6 @@ RATES: dict[int, Rate] = {
 }
 
 
-JCB_INSTALLMENTS = (*range(3, 25), 30, 36, 42, 48, 54, 60)
 JCB_DEFAULT_ANNUAL_RATE = Decimal("15.00")
 JCB_MIN_ANNUAL_RATE = Decimal("7.92")
 JCB_MAX_ANNUAL_RATE = Decimal("18.00")
@@ -83,7 +82,7 @@ JCB_RATES: dict[int, Rate] = {
         JCB_DEFAULT_ANNUAL_RATE,
         installment_coefficient(JCB_DEFAULT_ANNUAL_RATE, installments),
     )
-    for installments in JCB_INSTALLMENTS
+    for installments in (*range(3, 25), 30, 36, 42, 48, 54, 60)
 }
 
 # JCB公式返済シミュレーターの月額算出では、60回払いについて
@@ -95,7 +94,7 @@ JCB_PAYMENT_COEFFICIENT_OVERRIDES: dict[int, Decimal] = {
 CARD_PLANS: dict[str, CardPlan] = {
     "smbc": CardPlan(
         "三井住友カード",
-        RATES,
+        SMBC_RATES,
         "定額分割方式（総額均等割）による表示です。繰り上げ返済時の精算額とは異なります。",
     ),
     "jcb": CardPlan(
