@@ -10,9 +10,17 @@ from split_calc import (
     CARD_PLANS,
     InstallmentCalculator,
     JcbInstallmentCalculator,
+    OptimizationResult,
+    Payment,
+    PaymentPlan,
+    Payoff,
+    SavingEntry,
     SmbcInstallmentCalculator,
     display_width,
     main,
+    optimize_payoffs,
+    payment_plan_value,
+    print_optimization,
     print_result,
     simulate,
 )
@@ -129,6 +137,163 @@ class SimulateTest(unittest.TestCase):
             simulate(100_000, 10, annual_rate=Decimal("15.00"))
 
 
+class OptimizePayoffsTest(unittest.TestCase):
+    def test_selects_order_with_lowest_remaining_fees(self):
+        plans = [
+            PaymentPlan("高金利", 100, 2, date(2026, 8, 1)),
+            PaymentPlan("低金利", 100, 2, date(2026, 8, 1)),
+        ]
+        schedules = {
+            "high": [
+                Payment(1, "2026-09", 70, 50, 20, 50),
+                Payment(2, "2026-10", 60, 50, 10, 0),
+            ],
+            "low": [
+                Payment(1, "2026-09", 55, 50, 5, 50),
+                Payment(2, "2026-10", 52, 50, 2, 0),
+            ],
+        }
+
+        with patch(
+            "split_calc.simulate",
+            side_effect=[schedules["high"], schedules["low"]],
+        ):
+            result = optimize_payoffs(plans, 50)
+
+        self.assertEqual(result.order, ("高金利", "低金利"))
+        self.assertEqual(result.baseline_fee, 37)
+        self.assertEqual(result.optimized_fee, 27)
+        self.assertEqual(result.saved_fee, 10)
+        self.assertEqual(result.payoffs[0].name, "高金利")
+        self.assertEqual(result.payoffs[0].month, "2026-09")
+        self.assertEqual(result.payoffs[0].fund_before, 50)
+        self.assertEqual(result.payoffs[0].fund_after, 0)
+        self.assertEqual(result.payoffs[0].saving_month, 1)
+        self.assertEqual(
+            [(entry.number, entry.deposit, entry.withdrawal, entry.balance) for entry in result.saving_entries],
+            [(1, 50, 0, 50), (None, 0, 50, 0), (2, 50, 0, 50)],
+        )
+        self.assertEqual(result.saving_entries[0].regular_payments, (70, 55))
+        self.assertEqual(result.saving_entries[2].regular_payments, (0, 52))
+
+    def test_prints_saving_balance_before_and_after_payoff(self):
+        result = OptimizationResult(
+            ("家電",),
+            10_000,
+            5_000,
+            (Payoff("2027-04", "家電", 223_282, 240_000, 16_718, 8),),
+            (
+                SavingEntry(
+                    8,
+                    "2027-04",
+                    "積立",
+                    30_000,
+                    0,
+                    240_000,
+                    (12_345,),
+                ),
+                SavingEntry(
+                    None,
+                    "2027-04",
+                    "繰上返済（家電）",
+                    0,
+                    223_282,
+                    16_718,
+                    (0,),
+                ),
+            ),
+            "2026-09",
+        )
+        output = StringIO()
+
+        with redirect_stdout(output):
+            print_optimization(result, 30_000)
+
+        lines = output.getvalue().splitlines()
+        header, separator, saving_row, payoff_row = lines[7:11]
+        self.assertEqual(display_width(header), display_width(separator))
+        self.assertEqual(display_width(saving_row), display_width(separator))
+        self.assertEqual(display_width(payoff_row), display_width(separator))
+        self.assertIn("返済", header)
+        self.assertIn("積立", header)
+        self.assertIn("繰上返済", header)
+        self.assertLess(header.index("返済"), header.index("積立"))
+        self.assertTrue(header.lstrip().startswith("回"))
+        self.assertTrue(saving_row.lstrip().startswith("8"))
+        self.assertIn("積立", saving_row)
+        self.assertIn("繰上返済（家電）", payoff_row)
+        self.assertIn("***********", saving_row)
+        self.assertIn("***********", payoff_row)
+        self.assertIn("223,282円", payoff_row)
+        self.assertIn("16,718円", payoff_row)
+        self.assertEqual(saving_row.count("12,345円"), 1)
+        self.assertIn("積立開始月: 2026-09", output.getvalue())
+
+    def test_saving_can_start_after_regular_payments_begin(self):
+        plan = PaymentPlan("家電", 100, 3, date(2026, 8, 1))
+        schedule = [
+            Payment(1, "2026-09", 30, 20, 10, 80),
+            Payment(2, "2026-10", 28, 20, 8, 60),
+            Payment(3, "2026-11", 66, 60, 6, 0),
+        ]
+
+        with patch("split_calc.simulate", return_value=schedule):
+            result = optimize_payoffs(
+                [plan], 60, saving_start=date(2026, 10, 1)
+            )
+
+        self.assertEqual(result.saving_start_month, "2026-10")
+        self.assertEqual(result.optimized_fee, 18)
+        self.assertEqual(
+            [(entry.number, entry.month) for entry in result.saving_entries],
+            [(None, "2026-09"), (1, "2026-10"), (None, "2026-10")],
+        )
+        self.assertEqual(result.saving_entries[0].regular_payments, (30,))
+        self.assertEqual(result.saving_entries[1].regular_payments, (28,))
+
+    def test_rejects_duplicate_names(self):
+        plans = [
+            PaymentPlan("同じ", 10_000, 3, date(2026, 8, 1)),
+            PaymentPlan("同じ", 20_000, 3, date(2026, 8, 1)),
+        ]
+
+        with self.assertRaisesRegex(ValueError, "重複"):
+            optimize_payoffs(plans, 10_000)
+
+    def test_branch_and_bound_supports_more_than_eight_payments(self):
+        plans = [
+            PaymentPlan(f"支払い{index}", 1_000, 3, date(2026, 8, 1))
+            for index in range(9)
+        ]
+        schedule = [Payment(1, "2026-09", 1_000, 1_000, 0, 0)]
+
+        with patch("split_calc.simulate", return_value=schedule):
+            result = optimize_payoffs(plans, 9_000)
+
+        self.assertEqual(result.order, tuple(plan.name for plan in plans))
+        self.assertEqual(result.optimized_fee, 0)
+        self.assertEqual(result.payoffs, ())
+
+    def test_rejects_more_than_twelve_payments(self):
+        plans = [
+            PaymentPlan(f"支払い{index}", 1_000, 3, date(2026, 8, 1))
+            for index in range(13)
+        ]
+
+        with self.assertRaisesRegex(ValueError, "12件まで"):
+            optimize_payoffs(plans, 1_000)
+
+    def test_parses_repeated_payment_option_format(self):
+        plan = payment_plan_value("買い物:jcb:100000:10:18.00:2026-08")
+
+        self.assertEqual(plan.name, "買い物")
+        self.assertEqual(plan.card, "jcb")
+        self.assertEqual(plan.amount, 100_000)
+        self.assertEqual(plan.installments, 10)
+        self.assertEqual(plan.annual_rate, Decimal("18.00"))
+        self.assertEqual(plan.start_month, date(2026, 8, 1))
+
+
 class MainTest(unittest.TestCase):
     def test_result_columns_have_equal_display_widths(self):
         payments = simulate(650_000, 60, date(2026, 8, 1))
@@ -200,6 +365,196 @@ class MainTest(unittest.TestCase):
         self.assertEqual(exit_code, 0)
         simulate_mock.assert_called_once_with(
             100_000, 10, None, "jcb", Decimal("15.00")
+        )
+
+    def test_payoff_optimization_can_be_entered_interactively(self):
+        result = OptimizationResult(("家電", "家具"), 10_000, 5_000, ())
+        output = StringIO()
+        with (
+            patch(
+                "builtins.input",
+                side_effect=[
+                    "30000",
+                    "2026-07",
+                    "",
+                    "jcb",
+                    "18.00",
+                    "家電",
+                    "300000",
+                    "24",
+                    "2026-08",
+                    "y",
+                    "y",
+                    "",
+                    "",
+                    "家具",
+                    "200000",
+                    "20",
+                    "2026-08",
+                    "y",
+                    "n",
+                ],
+            ),
+            patch("split_calc.optimize_payoffs", return_value=result) as optimize_mock,
+            patch("split_calc.print_optimization") as print_mock,
+            redirect_stdout(output),
+        ):
+            exit_code = main(["--optimize"])
+
+        self.assertEqual(exit_code, 0)
+        plans = optimize_mock.call_args.args[0]
+        self.assertEqual(optimize_mock.call_args.args[1], 30_000)
+        self.assertEqual(optimize_mock.call_args.args[2], date(2026, 7, 1))
+        self.assertEqual(
+            plans,
+            [
+                PaymentPlan(
+                    "家電",
+                    300_000,
+                    24,
+                    date(2026, 8, 1),
+                    "jcb",
+                    Decimal("18.00"),
+                ),
+                PaymentPlan("家具", 200_000, 20, date(2026, 8, 1)),
+            ],
+        )
+        print_mock.assert_called_once_with(result, 30_000)
+        self.assertIn(
+            "\n--payment '家電:jcb:300000:24:18.00:2026-08'\n\n",
+            output.getvalue(),
+        )
+        self.assertIn(
+            "\n--payment '家具:smbc:200000:20::2026-08'\n\n",
+            output.getvalue(),
+        )
+
+    def test_invalid_interactive_value_is_retried_immediately(self):
+        result = OptimizationResult(("家具",), 1_000, 500, ())
+        output = StringIO()
+        with (
+            patch(
+                "builtins.input",
+                side_effect=[
+                    "0",
+                    "30000",
+                    "invalid",
+                    "2026-07",
+                    "",
+                    "invalid",
+                    "",
+                    "家具",
+                    "999",
+                    "200000",
+                    "7",
+                    "20",
+                    "invalid",
+                    "2026-08",
+                    "maybe",
+                    "y",
+                    "",
+                ],
+            ),
+            patch("split_calc.optimize_payoffs", return_value=result),
+            patch("split_calc.print_optimization"),
+            redirect_stdout(output),
+        ):
+            exit_code = main(["--optimize"])
+
+        self.assertEqual(exit_code, 0)
+        text = output.getvalue()
+        self.assertIn("エラー: 1以上で入力してください。", text)
+        self.assertIn("エラー: カード会社は次から選んでください", text)
+        self.assertIn("エラー: 支払金額は1,000円以上", text)
+        self.assertIn("エラー: 分割回数は次から選んでください", text)
+        self.assertIn("エラー: YYYY-MM 形式で入力してください。", text)
+        self.assertIn("エラー: y または n で入力してください。", text)
+
+    def test_payment_argument_can_shorten_interactive_input(self):
+        result = OptimizationResult(("家電",), 10_000, 5_000, ())
+        output = StringIO()
+        with (
+            patch(
+                "builtins.input",
+                side_effect=[
+                    "30000",
+                    "2026-07",
+                    "invalid",
+                    "家電:jcb:300000:24:18.00:2026-08",
+                    "y",
+                    "n",
+                ],
+            ),
+            patch("split_calc.optimize_payoffs", return_value=result) as optimize_mock,
+            patch("split_calc.print_optimization"),
+            redirect_stdout(output),
+        ):
+            exit_code = main(["--optimize"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            optimize_mock.call_args.args,
+            (
+                [
+                    PaymentPlan(
+                        "家電",
+                        300_000,
+                        24,
+                        date(2026, 8, 1),
+                        "jcb",
+                        Decimal("18.00"),
+                    )
+                ],
+                30_000,
+                date(2026, 7, 1),
+            ),
+        )
+        self.assertIn("エラー: 支払いは", output.getvalue())
+
+    def test_unconfirmed_payment_can_be_discarded_before_calculation(self):
+        result = OptimizationResult(("家電",), 10_000, 5_000, ())
+        output = StringIO()
+        with (
+            patch(
+                "builtins.input",
+                side_effect=[
+                    "30000",
+                    "2026-07",
+                    "家電:jcb:300000:24:18.00:2026-08",
+                    "y",
+                    "y",
+                    "家具:smbc:200000:20::2026-08",
+                    "n",
+                    "y",
+                ],
+            ),
+            patch("split_calc.optimize_payoffs", return_value=result) as optimize_mock,
+            patch("split_calc.print_optimization"),
+            redirect_stdout(output),
+        ):
+            exit_code = main(["--optimize"])
+
+        self.assertEqual(exit_code, 0)
+        self.assertEqual(
+            optimize_mock.call_args.args,
+            (
+                [
+                    PaymentPlan(
+                        "家電",
+                        300_000,
+                        24,
+                        date(2026, 8, 1),
+                        "jcb",
+                        Decimal("18.00"),
+                    )
+                ],
+                30_000,
+                date(2026, 7, 1),
+            ),
+        )
+        self.assertNotIn(
+            "--payment '家具:smbc:200000:20::2026-08'",
+            output.getvalue(),
         )
 
     def test_keyboard_interrupt_exits_without_traceback(self):

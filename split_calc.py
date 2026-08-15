@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import calendar
+import shlex
 import unicodedata
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
@@ -35,6 +36,53 @@ class CardPlan:
     rates: dict[int, Rate]
     note: str
     default_annual_rate: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class PaymentPlan:
+    """繰り上げ返済の比較対象となる1件の分割払い。"""
+
+    name: str
+    amount: int
+    installments: int
+    start_month: date
+    card: str = "smbc"
+    annual_rate: Decimal | None = None
+
+
+@dataclass(frozen=True)
+class Payoff:
+    month: str
+    name: str
+    amount: int
+    fund_before: int
+    fund_after: int
+    saving_month: int
+
+
+@dataclass(frozen=True)
+class SavingEntry:
+    number: int | None
+    month: str
+    description: str
+    deposit: int
+    withdrawal: int
+    balance: int
+    regular_payments: tuple[int, ...] = ()
+
+
+@dataclass(frozen=True)
+class OptimizationResult:
+    order: tuple[str, ...]
+    baseline_fee: int
+    optimized_fee: int
+    payoffs: tuple[Payoff, ...]
+    saving_entries: tuple[SavingEntry, ...] = ()
+    saving_start_month: str | None = None
+
+    @property
+    def saved_fee(self) -> int:
+        return self.baseline_fee - self.optimized_fee
 
 
 SMBC_CARD = "smbc"
@@ -303,6 +351,270 @@ def simulate(
     return calculator.calculate(amount, installments, start_month, annual_rate)
 
 
+def optimize_payoffs(
+    plans: Sequence[PaymentPlan],
+    monthly_saving: int,
+    saving_start: date | None = None,
+) -> OptimizationResult:
+    """毎月の積立で一括返済する順序を総手数料が最小になるよう選ぶ。
+
+    各月の積立後に対象の残元金を払える場合は一括返済し、足りない場合は
+    その月の通常支払いを行った後にも再判定する。通常支払いは積立とは別枠。
+    """
+    if not plans:
+        raise ValueError("支払いを1件以上指定してください。")
+    if monthly_saving <= 0:
+        raise ValueError("毎月の積立額は1円以上で入力してください。")
+    if len(plans) > 12:
+        raise ValueError("比較できる支払いは12件までです。")
+    names = [plan.name for plan in plans]
+    if any(not name.strip() for name in names):
+        raise ValueError("支払い名を入力してください。")
+    if len(set(names)) != len(names):
+        raise ValueError("支払い名は重複しないようにしてください。")
+
+    schedules = [
+        simulate(
+            plan.amount,
+            plan.installments,
+            plan.start_month,
+            plan.card,
+            plan.annual_rate,
+        )
+        for plan in plans
+    ]
+    baseline_fee = sum(payment.fee for schedule in schedules for payment in schedule)
+    first_payment_month = parse_month(min(schedule[0].month for schedule in schedules))
+    first_saving_month = saving_start or first_payment_month
+    timeline_start = min(first_payment_month, first_saving_month)
+
+    best_order: tuple[int, ...] | None = None
+    best_fee: int | None = None
+    best_payoffs: tuple[Payoff, ...] = ()
+    best_saving_entries: tuple[SavingEntry, ...] = ()
+    # 同一状態へより高い手数料で到達した枝は、その後も逆転できない。
+    lowest_fee_by_state: dict[tuple[object, ...], int] = {}
+
+    def search(
+        order: tuple[int, ...],
+        remaining: tuple[int, ...],
+        current: date,
+        before_payments: bool,
+        positions: tuple[int, ...],
+        balances: tuple[int, ...],
+        fund: int,
+        incurred_fee: int,
+        payoffs: tuple[Payoff, ...],
+        saving_entries: tuple[SavingEntry, ...],
+    ) -> None:
+        nonlocal best_order, best_fee, best_payoffs, best_saving_entries
+
+        # 将来の手数料は負にならないため、ここまでで最良値以上なら枝刈りできる。
+        if best_fee is not None and incurred_fee >= best_fee:
+            return
+
+        completed = tuple(index for index in remaining if balances[index] == 0)
+        if completed:
+            order += completed
+            completed_set = set(completed)
+            remaining = tuple(
+                index for index in remaining if index not in completed_set
+            )
+        if not remaining:
+            best_order = order
+            best_fee = incurred_fee
+            best_payoffs = payoffs
+            best_saving_entries = saving_entries
+            return
+
+        state_key = (
+            remaining,
+            current,
+            before_payments,
+            positions,
+            balances,
+            fund,
+        )
+        previous_fee = lowest_fee_by_state.get(state_key)
+        if previous_fee is not None and previous_fee <= incurred_fee:
+            return
+        lowest_fee_by_state[state_key] = incurred_fee
+
+        for target in remaining:
+            next_current = current
+            next_before_payments = before_payments
+            next_positions = list(positions)
+            next_balances = list(balances)
+            next_fund = fund
+            next_fee = incurred_fee
+            next_payoffs = payoffs
+            next_saving_entries = saving_entries
+
+            while next_before_payments or next_balances[target] > next_fund:
+                if next_before_payments:
+                    month = next_current.strftime("%Y-%m")
+                    regular_payments = [0] * len(plans)
+                    for index, schedule in enumerate(schedules):
+                        position = next_positions[index]
+                        if next_balances[index] == 0 or position >= len(schedule):
+                            continue
+                        payment = schedule[position]
+                        if payment.month != month:
+                            continue
+                        next_balances[index] = payment.balance
+                        next_fee += payment.fee
+                        next_positions[index] += 1
+                        regular_payments[index] = payment.amount
+                    for entry_index in range(
+                        len(next_saving_entries) - 1, -1, -1
+                    ):
+                        entry = next_saving_entries[entry_index]
+                        if entry.month == month and entry.description in {
+                            "積立",
+                            "積立開始前",
+                        }:
+                            next_saving_entries = (
+                                next_saving_entries[:entry_index]
+                                + (
+                                    SavingEntry(
+                                        entry.number,
+                                        entry.month,
+                                        entry.description,
+                                        entry.deposit,
+                                        entry.withdrawal,
+                                        entry.balance,
+                                        tuple(regular_payments),
+                                    ),
+                                )
+                                + next_saving_entries[entry_index + 1 :]
+                            )
+                            break
+                    next_before_payments = False
+                else:
+                    next_current = add_months(next_current, 1)
+                    next_before_payments = True
+                    if next_current >= first_saving_month:
+                        next_fund += monthly_saving
+                        saving_month = (
+                            (next_current.year - first_saving_month.year) * 12
+                            + next_current.month
+                            - first_saving_month.month
+                            + 1
+                        )
+                        next_saving_entries += (
+                            SavingEntry(
+                                saving_month,
+                                next_current.strftime("%Y-%m"),
+                                "積立",
+                                monthly_saving,
+                                0,
+                                next_fund,
+                                (0,) * len(plans),
+                            ),
+                        )
+                    else:
+                        next_saving_entries += (
+                            SavingEntry(
+                                None,
+                                next_current.strftime("%Y-%m"),
+                                "積立開始前",
+                                0,
+                                0,
+                                next_fund,
+                                (0,) * len(plans),
+                            ),
+                        )
+                if next_balances[target] == 0:
+                    break
+
+            if next_balances[target] > 0:
+                payoff_amount = next_balances[target]
+                fund_before = next_fund
+                next_fund -= payoff_amount
+                next_balances[target] = 0
+                next_payoffs += (
+                    Payoff(
+                        next_current.strftime("%Y-%m"),
+                        plans[target].name,
+                        payoff_amount,
+                        fund_before,
+                        next_fund,
+                        (next_current.year - first_saving_month.year) * 12
+                        + next_current.month
+                        - first_saving_month.month
+                        + 1,
+                    ),
+                )
+                next_saving_entries += (
+                    SavingEntry(
+                        None,
+                        next_current.strftime("%Y-%m"),
+                        f"繰上返済（{plans[target].name}）",
+                        0,
+                        payoff_amount,
+                        next_fund,
+                        (0,) * len(plans),
+                    ),
+                )
+
+            search(
+                order + (target,),
+                tuple(index for index in remaining if index != target),
+                next_current,
+                next_before_payments,
+                tuple(next_positions),
+                tuple(next_balances),
+                next_fund,
+                next_fee,
+                next_payoffs,
+                next_saving_entries,
+            )
+
+    search(
+        (),
+        tuple(range(len(plans))),
+        timeline_start,
+        True,
+        (0,) * len(plans),
+        tuple(plan.amount for plan in plans),
+        monthly_saving if timeline_start == first_saving_month else 0,
+        0,
+        (),
+        (
+            SavingEntry(
+                1,
+                first_saving_month.strftime("%Y-%m"),
+                "積立",
+                monthly_saving,
+                0,
+                monthly_saving,
+                (0,) * len(plans),
+            ),
+        )
+        if timeline_start == first_saving_month
+        else (
+            SavingEntry(
+                None,
+                timeline_start.strftime("%Y-%m"),
+                "積立開始前",
+                0,
+                0,
+                0,
+                (0,) * len(plans),
+            ),
+        ),
+    )
+    assert best_order is not None and best_fee is not None
+    return OptimizationResult(
+        tuple(plans[index].name for index in best_order),
+        baseline_fee,
+        best_fee,
+        best_payoffs,
+        best_saving_entries,
+        first_saving_month.strftime("%Y-%m"),
+    )
+
+
 def yen(value: int) -> str:
     return f"{value:,}円"
 
@@ -322,6 +634,11 @@ def display_width(value: str) -> int:
 def display_rjust(value: str, width: int) -> str:
     """全角文字の表示幅を考慮して文字列を右寄せする。"""
     return " " * max(0, width - display_width(value)) + value
+
+
+def display_ljust(value: str, width: int) -> str:
+    """全角文字の表示幅を考慮して文字列を左寄せする。"""
+    return value + " " * max(0, width - display_width(value))
 
 
 def print_result(
@@ -395,6 +712,275 @@ def card_value(value: str) -> str:
     return value
 
 
+def payment_plan_value(value: str) -> PaymentPlan:
+    """NAME:CARD:AMOUNT:INSTALLMENTS[:RATE[:START]] を解析する。"""
+    parts = value.split(":")
+    if not 4 <= len(parts) <= 6:
+        raise argparse.ArgumentTypeError(
+            "支払いは NAME:CARD:AMOUNT:INSTALLMENTS[:RATE[:START]] 形式で入力してください。"
+        )
+    name, card_text, amount_text, installments_text = parts[:4]
+    if not name.strip():
+        raise argparse.ArgumentTypeError("支払い名を入力してください。")
+    card = card_value(card_text)
+    amount = positive_integer(amount_text)
+    if amount < 1_000:
+        raise argparse.ArgumentTypeError(
+            "支払金額は1,000円以上で入力してください。"
+        )
+    installments = positive_integer(installments_text)
+    if installments not in CARD_PLANS[card].rates:
+        choices = ", ".join(str(item) for item in CARD_PLANS[card].rates)
+        raise argparse.ArgumentTypeError(
+            f"分割回数は次から選んでください: {choices}"
+        )
+    rate = annual_rate_value(parts[4]) if len(parts) >= 5 and parts[4] else None
+    start = (
+        parse_month(parts[5])
+        if len(parts) == 6
+        else date.today().replace(day=1)
+    )
+    if card != JCB_CARD and rate is not None:
+        raise argparse.ArgumentTypeError("年率の指定はJCBでのみ利用できます。")
+    return PaymentPlan(name, amount, installments, start, card, rate)
+
+
+def print_optimization(result: OptimizationResult, monthly_saving: int) -> None:
+    print("\n繰り上げ返済の最適化（概算）")
+    print(f"毎月の積立額: {yen(monthly_saving)}")
+    if result.saving_start_month is not None:
+        print(f"積立開始月: {result.saving_start_month}")
+    print(f"推奨順序: {' → '.join(result.order)}")
+    print(
+        f"手数料: {yen(result.baseline_fee)} → {yen(result.optimized_fee)} "
+        f"（{yen(result.saved_fee)}削減）"
+    )
+    if result.saving_entries:
+        headers = (
+            "回",
+            "月",
+            "摘要",
+            "返済",
+            "積立",
+            "繰上返済",
+            "積立残高",
+        )
+        rows = [
+            (
+                str(entry.number) if entry.number is not None else "",
+                entry.month,
+                entry.description,
+                yen(sum(entry.regular_payments))
+                if any(entry.regular_payments)
+                else "*",
+                yen(entry.deposit) if entry.deposit else "*",
+                yen(entry.withdrawal) if entry.withdrawal else "*",
+                yen(entry.balance),
+            )
+            for entry in result.saving_entries
+        ]
+        widths = [
+            max(display_width(headers[i]), *(display_width(row[i]) for row in rows))
+            for i in range(len(headers))
+        ]
+        million_yen_width = display_width(yen(9_999_999))
+        for index in range(3, len(headers)):
+            widths[index] = max(widths[index], million_yen_width)
+        print()
+        print(
+            "  ".join(
+                display_ljust(headers[i], widths[i])
+                if i in {1, 2}
+                else display_rjust(headers[i], widths[i])
+                for i in range(len(headers))
+            )
+        )
+        print("  ".join("-" * width for width in widths))
+        for row in rows:
+            print(
+                "  ".join(
+                    "*" * widths[i]
+                    if row[i] == "*"
+                    else display_ljust(row[i], widths[i])
+                    if i in {1, 2}
+                    else display_rjust(row[i], widths[i])
+                    for i in range(len(row))
+                )
+            )
+    print("\n※通常支払いとは別に積み立て、残元金を一括返済できる月で比較した概算です。")
+    print("※実際の精算額・手数料はカード会社に確認してください。")
+
+
+def input_value(prompt: str, converter, default: str | None = None):
+    """値が妥当になるまで同じ項目を入力させる。"""
+    while True:
+        value = input(prompt).strip()
+        if not value and default is not None:
+            value = default
+        try:
+            return converter(value)
+        except (ValueError, argparse.ArgumentTypeError) as error:
+            print(f"エラー: {error}")
+
+
+def confirmation_value(prompt: str) -> bool:
+    """yes/noを妥当な形式で入力させる。"""
+    while True:
+        value = input(prompt).strip().lower()
+        if value in {"y", "yes"}:
+            return True
+        if value in {"", "n", "no"}:
+            return False
+        print("エラー: y または n で入力してください。")
+
+
+def payment_plan_option(plan: PaymentPlan) -> str:
+    """PaymentPlanを再利用可能な--payment引数へ変換する。"""
+    rate = format(plan.annual_rate, "f") if plan.annual_rate is not None else ""
+    value = ":".join(
+        (
+            plan.name,
+            plan.card,
+            str(plan.amount),
+            str(plan.installments),
+            rate,
+            plan.start_month.strftime("%Y-%m"),
+        )
+    )
+    return f"--payment {shlex.quote(value)}"
+
+
+def input_payment_plans() -> tuple[list[PaymentPlan], int, date | None]:
+    """繰り上げ返済の条件を対話形式で入力する。"""
+    monthly_saving = input_value(
+        "毎月の繰り上げ返済積立額（円）: ", positive_integer
+    )
+    while True:
+        saving_start_text = input(
+            "積立開始月（YYYY-MM、省略時は最初の支払月）: "
+        ).strip()
+        if not saving_start_text:
+            saving_start = None
+            break
+        try:
+            saving_start = parse_month(saving_start_text)
+            break
+        except argparse.ArgumentTypeError as error:
+            print(f"エラー: {error}")
+    card_choices = "/".join(CARD_PLANS)
+    default_start = date.today().replace(day=1)
+    plans: list[PaymentPlan] = []
+    finish_input = False
+    while len(plans) < 12:
+        index = len(plans) + 1
+        print(f"\n--- 支払い {index} ---")
+        while True:
+            shortcut = input(
+                "--payment の引数部分（個別入力は空Enter）: "
+            ).strip()
+            if shortcut:
+                try:
+                    plan = payment_plan_value(shortcut)
+                    if plan.name in {item.name for item in plans}:
+                        raise ValueError(
+                            "支払い名は重複しないようにしてください。"
+                        )
+                except (ValueError, argparse.ArgumentTypeError) as error:
+                    print(f"エラー: {error}")
+                    continue
+            else:
+                card = input_value(
+                    f"カード会社（{card_choices}） [{DEFAULT_CARD}]: ",
+                    card_value,
+                    DEFAULT_CARD,
+                )
+                annual_rate = None
+                if card == JCB_CARD:
+                    annual_rate = input_value(
+                        f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: ",
+                        annual_rate_value,
+                        format(JCB_DEFAULT_ANNUAL_RATE, "f"),
+                    )
+                default_name = f"支払い{index}"
+
+                def name_value(value: str) -> str:
+                    if ":" in value:
+                        raise ValueError("支払い名にコロン（:）は使用できません。")
+                    if value in {plan.name for plan in plans}:
+                        raise ValueError("支払い名は重複しないようにしてください。")
+                    return value
+
+                name = input_value(
+                    f"支払い名 [{default_name}]: ", name_value, default_name
+                )
+
+                def amount_value(value: str) -> int:
+                    amount = positive_integer(value)
+                    if amount < 1_000:
+                        raise ValueError("支払金額は1,000円以上で入力してください。")
+                    return amount
+
+                amount = input_value("利用金額（円）: ", amount_value)
+
+                def installments_value(value: str) -> int:
+                    installments = positive_integer(value)
+                    if installments not in CARD_PLANS[card].rates:
+                        choices = ", ".join(
+                            str(item) for item in CARD_PLANS[card].rates
+                        )
+                        raise ValueError(
+                            f"分割回数は次から選んでください: {choices}"
+                        )
+                    return installments
+
+                installments = input_value("分割回数: ", installments_value)
+                start_month = input_value(
+                    f"申込月（YYYY-MM） [{default_start.strftime('%Y-%m')}]: ",
+                    parse_month,
+                    default_start.strftime("%Y-%m"),
+                )
+                plan = PaymentPlan(
+                    name,
+                    amount,
+                    installments,
+                    start_month,
+                    card,
+                    annual_rate,
+                )
+            rate_text = (
+                f" / 実質年率: {plan.annual_rate}%"
+                if plan.annual_rate is not None
+                else ""
+            )
+            print("\n入力内容")
+            print(f"カード会社: {CARD_PLANS[plan.card].name}{rate_text}")
+            print(f"支払い名: {plan.name}")
+            print(
+                f"利用金額: {yen(plan.amount)} / 分割回数: {plan.installments}回"
+            )
+            print(f"申込月: {plan.start_month.strftime('%Y-%m')}")
+            if confirmation_value("この内容でよろしいですか？ [y/N]: "):
+                break
+            if confirmation_value(
+                "この支払いを破棄して計算に進みますか？ [y/N]: "
+            ):
+                if plans:
+                    finish_input = True
+                    break
+                print("エラー: 計算には確定済みの支払いが1件以上必要です。")
+            print("入力内容を破棄して、この支払いを入力し直します。")
+        if finish_input:
+            break
+        plans.append(plan)
+        print(f"\n{payment_plan_option(plan)}\n")
+        if len(plans) == 12:
+            print("\n最大件数の12件に達したため、計算を開始します。")
+            break
+        if not confirmation_value("支払いを追加しますか？ [y/N]: "):
+            break
+    return plans, monthly_saving, saving_start
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="あとから分割の月別支払額を計算します。")
     parser.add_argument("amount", nargs="?", type=positive_integer, help="利用金額（円）")
@@ -412,12 +998,80 @@ def build_parser() -> argparse.ArgumentParser:
         help=f"JCBの実質年率（既定: {JCB_DEFAULT_ANNUAL_RATE}）",
     )
     parser.add_argument("--start", type=parse_month, metavar="YYYY-MM", help="申込月（省略時は今月）")
+    parser.add_argument(
+        "--optimize",
+        action="store_true",
+        help="繰り上げ返済の条件を対話形式で入力して最適化する",
+    )
+    parser.add_argument(
+        "--payment",
+        action="append",
+        type=payment_plan_value,
+        metavar="SPEC",
+        help="最適化する支払い。NAME:CARD:AMOUNT:INSTALLMENTS[:RATE[:START]]（複数指定可）",
+    )
+    parser.add_argument(
+        "--monthly-saving",
+        type=positive_integer,
+        metavar="YEN",
+        help="毎月の繰り上げ返済積立額",
+    )
+    parser.add_argument(
+        "--saving-start",
+        type=parse_month,
+        metavar="YYYY-MM",
+        help="積立開始月（既定: 最初の支払月）",
+    )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     try:
+        if args.optimize:
+            if any(
+                value is not None
+                for value in (
+                    args.amount,
+                    args.installments,
+                    args.card,
+                    args.annual_rate,
+                    args.start,
+                    args.payment,
+                    args.monthly_saving,
+                    args.saving_start,
+                )
+            ):
+                raise ValueError("--optimize は他の入力オプションと同時に指定できません。")
+            plans, monthly_saving, saving_start = input_payment_plans()
+            result = optimize_payoffs(plans, monthly_saving, saving_start)
+            print_optimization(result, monthly_saving)
+            return 0
+        if args.payment:
+            if args.monthly_saving is None:
+                raise ValueError("--payment には --monthly-saving が必要です。")
+            if any(
+                value is not None
+                for value in (
+                    args.amount,
+                    args.installments,
+                    args.card,
+                    args.annual_rate,
+                    args.start,
+                )
+            ):
+                raise ValueError(
+                    "最適化では位置引数および --card、--annual-rate、--start を指定できません。"
+                )
+            result = optimize_payoffs(
+                args.payment, args.monthly_saving, args.saving_start
+            )
+            print_optimization(result, args.monthly_saving)
+            return 0
+        if args.monthly_saving is not None or args.saving_start is not None:
+            raise ValueError(
+                "--monthly-saving と --saving-start には --payment が必要です。"
+            )
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
         card_choices = "/".join(CARD_PLANS)
