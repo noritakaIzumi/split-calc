@@ -5,10 +5,30 @@ from decimal import Decimal
 from io import StringIO
 from unittest.mock import patch
 
-from split_calc import CARD_PLANS, display_width, main, print_result, simulate
+from split_calc import (
+    CALCULATORS,
+    CARD_PLANS,
+    InstallmentCalculator,
+    JcbInstallmentCalculator,
+    SmbcInstallmentCalculator,
+    display_width,
+    main,
+    print_result,
+    simulate,
+)
 
 
 class SimulateTest(unittest.TestCase):
+    def test_each_card_uses_installment_calculator_interface(self):
+        self.assertIsInstance(CALCULATORS["smbc"], SmbcInstallmentCalculator)
+        self.assertIsInstance(CALCULATORS["jcb"], JcbInstallmentCalculator)
+        self.assertTrue(
+            all(
+                isinstance(calculator, InstallmentCalculator)
+                for calculator in CALCULATORS.values()
+            )
+        )
+
     def test_official_60000_yen_three_installment_example(self):
         payments = simulate(60_000, 3, date(2026, 8, 1))
 
@@ -99,6 +119,10 @@ class SimulateTest(unittest.TestCase):
     def test_rejects_jcb_annual_rate_outside_supported_range(self):
         with self.assertRaisesRegex(ValueError, "7.92%～18.00%"):
             simulate(100_000, 10, card="jcb", annual_rate=Decimal("18.01"))
+
+    def test_rejects_zero_jcb_annual_rate_instead_of_using_default(self):
+        with self.assertRaisesRegex(ValueError, "7.92%～18.00%"):
+            simulate(100_000, 10, card="jcb", annual_rate=Decimal("0"))
 
     def test_rejects_annual_rate_for_smbc(self):
         with self.assertRaisesRegex(ValueError, "JCBでのみ"):

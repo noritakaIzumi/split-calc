@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import calendar
 import unicodedata
+from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
@@ -105,6 +106,170 @@ CARD_PLANS: dict[str, CardPlan] = {
 }
 
 
+class InstallmentCalculator(ABC):
+    """カード会社ごとの分割払い計算ロジックが実装するインターフェース。"""
+
+    def __init__(self, plan: CardPlan) -> None:
+        self.plan = plan
+
+    def calculate(
+        self,
+        amount: int,
+        installments: int,
+        start_month: date,
+        annual_rate: Decimal | None = None,
+    ) -> list[Payment]:
+        """入力を検証し、カード会社固有の月別支払予定を返す。"""
+        if installments not in self.plan.rates:
+            choices = ", ".join(str(value) for value in self.plan.rates)
+            raise ValueError(f"分割回数は次から選んでください: {choices}")
+        return self._calculate(amount, installments, start_month, annual_rate)
+
+    @abstractmethod
+    def _calculate(
+        self,
+        amount: int,
+        installments: int,
+        start_month: date,
+        annual_rate: Decimal | None,
+    ) -> list[Payment]:
+        """カード会社固有の計算を行う。"""
+
+
+class SmbcInstallmentCalculator(InstallmentCalculator):
+    """三井住友カードの定額分割方式を計算する。"""
+
+    def _calculate(
+        self,
+        amount: int,
+        installments: int,
+        start_month: date,
+        annual_rate: Decimal | None,
+    ) -> list[Payment]:
+        if annual_rate is not None:
+            raise ValueError("年率の指定はJCBでのみ利用できます。")
+
+        rate = self.plan.rates[installments]
+        total_fee = int(
+            (Decimal(amount) * rate.fee_per_100_yen / Decimal(100)).quantize(
+                Decimal("1"), rounding=ROUND_DOWN
+            )
+        )
+        total = amount + total_fee
+        regular_payment, first_remainder = divmod(total, installments)
+        regular_principal, first_principal_remainder = divmod(amount, installments)
+
+        balance = amount
+        result: list[Payment] = []
+        for number in range(1, installments + 1):
+            payment_amount = regular_payment + (first_remainder if number == 1 else 0)
+            principal = regular_principal + (
+                first_principal_remainder if number == 1 else 0
+            )
+            monthly_fee = payment_amount - principal
+            balance -= principal
+            result.append(
+                Payment(
+                    number,
+                    add_months(start_month, number).strftime("%Y-%m"),
+                    payment_amount,
+                    principal,
+                    monthly_fee,
+                    balance,
+                )
+            )
+        return result
+
+
+class JcbInstallmentCalculator(InstallmentCalculator):
+    """JCBの初回日割り・2回目以降月利方式を計算する。"""
+
+    def _calculate(
+        self,
+        amount: int,
+        installments: int,
+        start_month: date,
+        annual_rate: Decimal | None,
+    ) -> list[Payment]:
+        selected_annual_rate = (
+            JCB_DEFAULT_ANNUAL_RATE if annual_rate is None else annual_rate
+        )
+        if not selected_annual_rate.is_finite() or not (
+            JCB_MIN_ANNUAL_RATE <= selected_annual_rate <= JCB_MAX_ANNUAL_RATE
+        ):
+            raise ValueError(
+                f"JCBの年率は{JCB_MIN_ANNUAL_RATE}%～{JCB_MAX_ANNUAL_RATE}%で入力してください。"
+            )
+        rate = Rate(
+            selected_annual_rate,
+            installment_coefficient(selected_annual_rate, installments),
+        )
+        monthly_rate = rate.annual_rate / Decimal(1200)
+        payment_coefficient = rate.fee_per_100_yen
+        if rate.annual_rate == Decimal("18.00"):
+            payment_coefficient = JCB_PAYMENT_COEFFICIENT_OVERRIDES.get(
+                installments, payment_coefficient
+            )
+        fee_upper_estimate = int(
+            (Decimal(amount) * payment_coefficient / Decimal(100)).quantize(
+                Decimal("1"), rounding=ROUND_DOWN
+            )
+        )
+        regular_payment = (amount + fee_upper_estimate) // installments
+        first_payment_month = add_months(start_month, 1)
+        first_period_start = date(start_month.year, start_month.month, 16)
+        first_payment_date = date(
+            first_payment_month.year, first_payment_month.month, 10
+        )
+        first_period_days = (first_payment_date - first_period_start).days + 1
+
+        balance = amount
+        result: list[Payment] = []
+        for number in range(1, installments + 1):
+            standard_fee = int(
+                (Decimal(balance) * monthly_rate).quantize(
+                    Decimal("1"), rounding=ROUND_DOWN
+                )
+            )
+            if number == installments:
+                principal = balance
+            else:
+                principal = regular_payment - standard_fee
+
+            if number == 1:
+                monthly_fee = int(
+                    (
+                        Decimal(balance)
+                        * rate.annual_rate
+                        / Decimal(100)
+                        * Decimal(first_period_days)
+                        / Decimal(365)
+                    ).quantize(Decimal("1"), rounding=ROUND_DOWN)
+                )
+            else:
+                monthly_fee = standard_fee
+
+            payment_amount = principal + monthly_fee
+            balance -= principal
+            result.append(
+                Payment(
+                    number,
+                    add_months(start_month, number).strftime("%Y-%m"),
+                    payment_amount,
+                    principal,
+                    monthly_fee,
+                    balance,
+                )
+            )
+        return result
+
+
+CALCULATORS: dict[str, InstallmentCalculator] = {
+    "smbc": SmbcInstallmentCalculator(CARD_PLANS["smbc"]),
+    "jcb": JcbInstallmentCalculator(CARD_PLANS["jcb"]),
+}
+
+
 def add_months(value: date, months: int) -> date:
     month_index = value.year * 12 + value.month - 1 + months
     year, month_zero_based = divmod(month_index, 12)
@@ -123,147 +288,12 @@ def simulate(
     if amount < 1_000:
         raise ValueError("支払金額は1,000円以上で入力してください。")
     try:
-        plan = CARD_PLANS[card]
+        calculator = CALCULATORS[card]
     except KeyError as error:
-        choices = ", ".join(CARD_PLANS)
+        choices = ", ".join(CALCULATORS)
         raise ValueError(f"カード会社は次から選んでください: {choices}") from error
-    if installments not in plan.rates:
-        choices = ", ".join(str(value) for value in plan.rates)
-        raise ValueError(f"分割回数は次から選んでください: {choices}")
-    if annual_rate is not None and card != "jcb":
-        raise ValueError("年率の指定はJCBでのみ利用できます。")
-    if annual_rate is not None and (
-        not annual_rate.is_finite()
-        or not (JCB_MIN_ANNUAL_RATE <= annual_rate <= JCB_MAX_ANNUAL_RATE)
-    ):
-        raise ValueError(
-            f"JCBの年率は{JCB_MIN_ANNUAL_RATE}%～{JCB_MAX_ANNUAL_RATE}%で入力してください。"
-        )
-
     start_month = start_month or date.today().replace(day=1)
-    rate = plan.rates[installments]
-    if card == "jcb":
-        selected_annual_rate = annual_rate or JCB_DEFAULT_ANNUAL_RATE
-        rate = Rate(
-            selected_annual_rate,
-            installment_coefficient(selected_annual_rate, installments),
-        )
-        return simulate_jcb(amount, installments, start_month, rate)
-
-    total_fee = int(
-        (Decimal(amount) * rate.fee_per_100_yen / Decimal(100)).quantize(
-            Decimal("1"), rounding=ROUND_DOWN
-        )
-    )
-    total = amount + total_fee
-    regular_payment, first_remainder = divmod(total, installments)
-    regular_principal, first_principal_remainder = divmod(amount, installments)
-
-    balance = amount
-    allocated_fee = 0
-    result: list[Payment] = []
-    for number in range(1, installments + 1):
-        payment_amount = regular_payment + (first_remainder if number == 1 else 0)
-        if card == "smbc":
-            # 定額分割方式（総額均等割）。元金と確定済みの手数料を
-            # 支払回数で均等に分け、端数は初回へ加える。
-            principal = regular_principal + (
-                first_principal_remainder if number == 1 else 0
-            )
-            monthly_fee = payment_amount - principal
-        elif number == installments:
-            monthly_fee = total_fee - allocated_fee
-            principal = balance
-            payment_amount = principal + monthly_fee
-        else:
-            monthly_fee = int(
-                (Decimal(balance) * rate.annual_rate / Decimal(1200)).quantize(
-                    Decimal("1"), rounding=ROUND_DOWN
-                )
-            )
-            # 丸めの累積で公式総手数料を超えないようにする。
-            monthly_fee = min(monthly_fee, total_fee - allocated_fee)
-            principal = payment_amount - monthly_fee
-
-        balance -= principal
-        allocated_fee += monthly_fee
-        payment_month = add_months(start_month, number)
-        result.append(
-            Payment(
-                number,
-                payment_month.strftime("%Y-%m"),
-                payment_amount,
-                principal,
-                monthly_fee,
-                balance,
-            )
-        )
-    return result
-
-
-def simulate_jcb(
-    amount: int,
-    installments: int,
-    start_month: date,
-    rate: Rate,
-) -> list[Payment]:
-    """JCBの初回日割り・2回目以降月利方式で月別予定を返す。"""
-    monthly_rate = rate.annual_rate / Decimal(1200)
-    payment_coefficient = rate.fee_per_100_yen
-    if rate.annual_rate == Decimal("18.00"):
-        payment_coefficient = JCB_PAYMENT_COEFFICIENT_OVERRIDES.get(
-            installments, payment_coefficient
-        )
-    fee_upper_estimate = int(
-        (Decimal(amount) * payment_coefficient / Decimal(100)).quantize(
-            Decimal("1"), rounding=ROUND_DOWN
-        )
-    )
-    regular_payment = (amount + fee_upper_estimate) // installments
-    first_payment_month = add_months(start_month, 1)
-    first_period_start = date(start_month.year, start_month.month, 16)
-    first_payment_date = date(first_payment_month.year, first_payment_month.month, 10)
-    first_period_days = (first_payment_date - first_period_start).days + 1
-
-    balance = amount
-    result: list[Payment] = []
-    for number in range(1, installments + 1):
-        standard_fee = int(
-            (Decimal(balance) * monthly_rate).quantize(
-                Decimal("1"), rounding=ROUND_DOWN
-            )
-        )
-        if number == installments:
-            principal = balance
-        else:
-            principal = regular_payment - standard_fee
-
-        if number == 1:
-            monthly_fee = int(
-                (
-                    Decimal(balance)
-                    * rate.annual_rate
-                    / Decimal(100)
-                    * Decimal(first_period_days)
-                    / Decimal(365)
-                ).quantize(Decimal("1"), rounding=ROUND_DOWN)
-            )
-        else:
-            monthly_fee = standard_fee
-
-        payment_amount = principal + monthly_fee
-        balance -= principal
-        result.append(
-            Payment(
-                number,
-                add_months(start_month, number).strftime("%Y-%m"),
-                payment_amount,
-                principal,
-                monthly_fee,
-                balance,
-            )
-        )
-    return result
+    return calculator.calculate(amount, installments, start_month, annual_rate)
 
 
 def yen(value: int) -> str:
