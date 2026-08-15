@@ -36,6 +36,11 @@ class CardPlan:
     note: str
 
 
+SMBC_CARD = "smbc"
+JCB_CARD = "jcb"
+DEFAULT_CARD = SMBC_CARD
+
+
 # 2025年4月1日改定後の三井住友カード「あとから分割」手数料率。
 SMBC_RATES: dict[int, Rate] = {
     3: Rate(Decimal("14.70"), Decimal("2.46")),
@@ -76,7 +81,7 @@ def installment_coefficient(annual_rate: Decimal, installments: int) -> Decimal:
     return coefficient.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
 
-# JCBの既定実質年率15.00%の場合の割賦係数。初回の日割計算前の上限目安。
+# JCBの既定実質年率の場合の割賦係数。初回の日割計算前の上限目安。
 JCB_RATES: dict[int, Rate] = {
     installments: Rate(
         JCB_DEFAULT_ANNUAL_RATE,
@@ -92,12 +97,12 @@ JCB_PAYMENT_COEFFICIENT_OVERRIDES: dict[int, Decimal] = {
 }
 
 CARD_PLANS: dict[str, CardPlan] = {
-    "smbc": CardPlan(
+    SMBC_CARD: CardPlan(
         "三井住友カード",
         SMBC_RATES,
         "定額分割方式（総額均等割）による表示です。繰り上げ返済時の精算額とは異なります。",
     ),
-    "jcb": CardPlan(
+    JCB_CARD: CardPlan(
         "JCB",
         JCB_RATES,
         "指定年率、15日締め翌月10日払いとして計算しています。実際の請求とは異なる場合があります。",
@@ -264,8 +269,8 @@ class JcbInstallmentCalculator(InstallmentCalculator):
 
 
 CALCULATORS: dict[str, InstallmentCalculator] = {
-    "smbc": SmbcInstallmentCalculator(CARD_PLANS["smbc"]),
-    "jcb": JcbInstallmentCalculator(CARD_PLANS["jcb"]),
+    SMBC_CARD: SmbcInstallmentCalculator(CARD_PLANS[SMBC_CARD]),
+    JCB_CARD: JcbInstallmentCalculator(CARD_PLANS[JCB_CARD]),
 }
 
 
@@ -280,7 +285,7 @@ def simulate(
     amount: int,
     installments: int,
     start_month: date | None = None,
-    card: str = "smbc",
+    card: str = DEFAULT_CARD,
     annual_rate: Decimal | None = None,
 ) -> list[Payment]:
     """月別支払予定を返す。start_month の翌月を第1回支払月とする。"""
@@ -320,7 +325,7 @@ def print_result(
     amount: int,
     installments: int,
     payments: Sequence[Payment],
-    card: str = "smbc",
+    card: str = DEFAULT_CARD,
     annual_rate: Decimal | None = None,
 ) -> None:
     plan = CARD_PLANS[card]
@@ -391,13 +396,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--card",
         type=card_value,
         metavar="CARD",
-        help="カード会社（省略時は対話入力、既定: smbc）",
+        help=f"カード会社（省略時は対話入力、既定: {DEFAULT_CARD}）",
     )
     parser.add_argument(
         "--annual-rate",
         type=annual_rate_value,
         metavar="PERCENT",
-        help="JCBの実質年率（既定: 15.00）",
+        help=f"JCBの実質年率（既定: {JCB_DEFAULT_ANNUAL_RATE}）",
     )
     parser.add_argument("--start", type=parse_month, metavar="YYYY-MM", help="申込月（省略時は今月）")
     return parser
@@ -408,12 +413,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
+        card_choices = "/".join(CARD_PLANS)
         card = args.card or card_value(
-            input("カード会社（smbc/jcb） [smbc]: ").strip() or "smbc"
+            input(f"カード会社（{card_choices}） [{DEFAULT_CARD}]: ").strip()
+            or DEFAULT_CARD
         )
 
         annual_rate = args.annual_rate
-        if card == "jcb" and annual_rate is None:
+        if card == JCB_CARD and annual_rate is None:
             rate_text = input(
                 f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: "
             ).strip()
