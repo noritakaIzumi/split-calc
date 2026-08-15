@@ -7,7 +7,7 @@ import argparse
 import calendar
 from dataclasses import dataclass
 from datetime import date
-from decimal import Decimal, ROUND_DOWN
+from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from typing import Sequence
 
 
@@ -58,6 +58,9 @@ RATES: dict[int, Rate] = {
 
 
 JCB_INSTALLMENTS = (*range(3, 25), 30, 36, 42, 48, 54, 60)
+JCB_DEFAULT_ANNUAL_RATE = Decimal("15.00")
+JCB_MIN_ANNUAL_RATE = Decimal("7.92")
+JCB_MAX_ANNUAL_RATE = Decimal("18.00")
 
 
 def installment_coefficient(annual_rate: Decimal, installments: int) -> Decimal:
@@ -72,11 +75,11 @@ def installment_coefficient(annual_rate: Decimal, installments: int) -> Decimal:
     return coefficient.quantize(Decimal("0.01"), rounding=ROUND_DOWN)
 
 
-# JCBが掲載する実質年率18.00%の場合の割賦係数。初回の日割計算前の上限目安。
+# JCBの既定実質年率15.00%の場合の割賦係数。初回の日割計算前の上限目安。
 JCB_RATES: dict[int, Rate] = {
     installments: Rate(
-        Decimal("18.00"),
-        installment_coefficient(Decimal("18.00"), installments),
+        JCB_DEFAULT_ANNUAL_RATE,
+        installment_coefficient(JCB_DEFAULT_ANNUAL_RATE, installments),
     )
     for installments in JCB_INSTALLMENTS
 }
@@ -96,7 +99,7 @@ CARD_PLANS: dict[str, CardPlan] = {
     "jcb": CardPlan(
         "JCB",
         JCB_RATES,
-        "年率18.00%、15日締め翌月10日払いとして計算しています。実際の請求とは異なる場合があります。",
+        "指定年率、15日締め翌月10日払いとして計算しています。実際の請求とは異なる場合があります。",
     ),
 }
 
@@ -113,6 +116,7 @@ def simulate(
     installments: int,
     start_month: date | None = None,
     card: str = "smbc",
+    annual_rate: Decimal | None = None,
 ) -> list[Payment]:
     """月別支払予定を返す。start_month の翌月を第1回支払月とする。"""
     if amount < 1_000:
@@ -125,10 +129,24 @@ def simulate(
     if installments not in plan.rates:
         choices = ", ".join(str(value) for value in plan.rates)
         raise ValueError(f"分割回数は次から選んでください: {choices}")
+    if annual_rate is not None and card != "jcb":
+        raise ValueError("年率の指定はJCBでのみ利用できます。")
+    if annual_rate is not None and (
+        not annual_rate.is_finite()
+        or not (JCB_MIN_ANNUAL_RATE <= annual_rate <= JCB_MAX_ANNUAL_RATE)
+    ):
+        raise ValueError(
+            f"JCBの年率は{JCB_MIN_ANNUAL_RATE}%～{JCB_MAX_ANNUAL_RATE}%で入力してください。"
+        )
 
     start_month = start_month or date.today().replace(day=1)
     rate = plan.rates[installments]
     if card == "jcb":
+        selected_annual_rate = annual_rate or JCB_DEFAULT_ANNUAL_RATE
+        rate = Rate(
+            selected_annual_rate,
+            installment_coefficient(selected_annual_rate, installments),
+        )
         return simulate_jcb(amount, installments, start_month, rate)
 
     total_fee = int(
@@ -190,9 +208,11 @@ def simulate_jcb(
 ) -> list[Payment]:
     """JCBの初回日割り・2回目以降月利方式で月別予定を返す。"""
     monthly_rate = rate.annual_rate / Decimal(1200)
-    payment_coefficient = JCB_PAYMENT_COEFFICIENT_OVERRIDES.get(
-        installments, rate.fee_per_100_yen
-    )
+    payment_coefficient = rate.fee_per_100_yen
+    if rate.annual_rate == Decimal("18.00"):
+        payment_coefficient = JCB_PAYMENT_COEFFICIENT_OVERRIDES.get(
+            installments, payment_coefficient
+        )
     fee_upper_estimate = int(
         (Decimal(amount) * payment_coefficient / Decimal(100)).quantize(
             Decimal("1"), rounding=ROUND_DOWN
@@ -254,12 +274,13 @@ def print_result(
     installments: int,
     payments: Sequence[Payment],
     card: str = "smbc",
+    annual_rate: Decimal | None = None,
 ) -> None:
     plan = CARD_PLANS[card]
-    rate = plan.rates[installments]
+    displayed_annual_rate = annual_rate or plan.rates[installments].annual_rate
     total_fee = sum(item.fee for item in payments)
     print(f"\n{plan.name} あとから分割シミュレーション")
-    print(f"利用金額: {yen(amount)} / {installments}回 / 実質年率: {rate.annual_rate}%")
+    print(f"利用金額: {yen(amount)} / {installments}回 / 実質年率: {displayed_annual_rate}%")
     print(f"手数料: {yen(total_fee)} / 支払総額: {yen(amount + total_fee)}\n")
 
     headers = ("回", "支払月", "支払金額", "元金", "手数料", "残元金")
@@ -293,6 +314,16 @@ def parse_month(value: str) -> date:
         raise argparse.ArgumentTypeError("YYYY-MM 形式で入力してください。") from error
 
 
+def annual_rate_value(value: str) -> Decimal:
+    try:
+        result = Decimal(value)
+    except InvalidOperation as error:
+        raise argparse.ArgumentTypeError("年率は数値で入力してください。") from error
+    if not result.is_finite():
+        raise argparse.ArgumentTypeError("年率は有限の数値で入力してください。")
+    return result
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="あとから分割の月別支払額を計算します。")
     parser.add_argument("amount", nargs="?", type=positive_integer, help="利用金額（円）")
@@ -303,6 +334,12 @@ def build_parser() -> argparse.ArgumentParser:
         default="smbc",
         help="カード会社（既定: smbc）",
     )
+    parser.add_argument(
+        "--annual-rate",
+        type=annual_rate_value,
+        metavar="PERCENT",
+        help="JCBの実質年率（既定: 15.00）",
+    )
     parser.add_argument("--start", type=parse_month, metavar="YYYY-MM", help="申込月（省略時は今月）")
     return parser
 
@@ -312,11 +349,17 @@ def main(argv: Sequence[str] | None = None) -> int:
     try:
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())
-        payments = simulate(amount, installments, args.start, args.card)
+        payments = simulate(
+            amount,
+            installments,
+            args.start,
+            args.card,
+            args.annual_rate,
+        )
     except (ValueError, argparse.ArgumentTypeError) as error:
         print(f"エラー: {error}")
         return 2
-    print_result(amount, installments, payments, args.card)
+    print_result(amount, installments, payments, args.card, args.annual_rate)
     return 0
 
 

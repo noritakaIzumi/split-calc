@@ -1,5 +1,6 @@
 import unittest
 from datetime import date
+from decimal import Decimal
 
 from split_calc import CARD_PLANS, simulate
 
@@ -41,7 +42,9 @@ class SimulateTest(unittest.TestCase):
             simulate(10_000, 7)
 
     def test_jcb_official_ten_installment_example(self):
-        payments = simulate(100_000, 10, date(2026, 8, 1), "jcb")
+        payments = simulate(
+            100_000, 10, date(2026, 8, 1), "jcb", Decimal("18.00")
+        )
 
         self.assertEqual(sum(p.amount for p in payments), 108_211)
         self.assertEqual(sum(p.principal for p in payments), 100_000)
@@ -52,7 +55,9 @@ class SimulateTest(unittest.TestCase):
         self.assertEqual(payments[-1].balance, 0)
 
     def test_jcb_sixty_installment_actual_schedule(self):
-        payments = simulate(502_700, 60, date(2026, 8, 1), "jcb")
+        payments = simulate(
+            502_700, 60, date(2026, 8, 1), "jcb", Decimal("18.00")
+        )
 
         self.assertEqual(
             [(p.amount, p.fee, p.balance) for p in payments[:11]],
@@ -80,6 +85,21 @@ class SimulateTest(unittest.TestCase):
     def test_rejects_unknown_card(self):
         with self.assertRaisesRegex(ValueError, "カード会社"):
             simulate(10_000, 3, card="unknown")
+
+    def test_jcb_defaults_to_fifteen_percent(self):
+        payments = simulate(100_000, 10, date(2026, 8, 1), "jcb")
+
+        self.assertEqual(payments[0].amount, 10_518)
+        self.assertEqual(payments[0].fee, 1_068)
+        self.assertEqual(payments[1].amount, 10_700)
+
+    def test_rejects_jcb_annual_rate_outside_supported_range(self):
+        with self.assertRaisesRegex(ValueError, "7.92%～18.00%"):
+            simulate(100_000, 10, card="jcb", annual_rate=Decimal("18.01"))
+
+    def test_rejects_annual_rate_for_smbc(self):
+        with self.assertRaisesRegex(ValueError, "JCBでのみ"):
+            simulate(100_000, 10, annual_rate=Decimal("15.00"))
 
 
 if __name__ == "__main__":
