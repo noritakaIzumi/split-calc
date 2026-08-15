@@ -34,6 +34,7 @@ class CardPlan:
     name: str
     rates: dict[int, Rate]
     note: str
+    default_annual_rate: Decimal | None = None
 
 
 SMBC_CARD = "smbc"
@@ -106,6 +107,7 @@ CARD_PLANS: dict[str, CardPlan] = {
         "JCB",
         JCB_RATES,
         "指定年率、15日締め翌月10日払いとして計算しています。実際の請求とは異なる場合があります。",
+        default_annual_rate=JCB_DEFAULT_ANNUAL_RATE,
     ),
 }
 
@@ -127,6 +129,8 @@ class InstallmentCalculator(ABC):
         if installments not in self.plan.rates:
             choices = ", ".join(str(value) for value in self.plan.rates)
             raise ValueError(f"分割回数は次から選んでください: {choices}")
+        if annual_rate is None:
+            annual_rate = self.plan.default_annual_rate
         return self._calculate(amount, installments, start_month, annual_rate)
 
     @abstractmethod
@@ -195,18 +199,17 @@ class JcbInstallmentCalculator(InstallmentCalculator):
         start_month: date,
         annual_rate: Decimal | None,
     ) -> list[Payment]:
-        selected_annual_rate = (
-            JCB_DEFAULT_ANNUAL_RATE if annual_rate is None else annual_rate
-        )
-        if not selected_annual_rate.is_finite() or not (
-            JCB_MIN_ANNUAL_RATE <= selected_annual_rate <= JCB_MAX_ANNUAL_RATE
+        if annual_rate is None:
+            raise RuntimeError("JCBの既定年率が設定されていません。")
+        if not annual_rate.is_finite() or not (
+            JCB_MIN_ANNUAL_RATE <= annual_rate <= JCB_MAX_ANNUAL_RATE
         ):
             raise ValueError(
                 f"JCBの年率は{JCB_MIN_ANNUAL_RATE}%～{JCB_MAX_ANNUAL_RATE}%で入力してください。"
             )
         rate = Rate(
-            selected_annual_rate,
-            installment_coefficient(selected_annual_rate, installments),
+            annual_rate,
+            installment_coefficient(annual_rate, installments),
         )
         monthly_rate = rate.annual_rate / Decimal(1200)
         payment_coefficient = rate.fee_per_100_yen
@@ -376,6 +379,10 @@ def annual_rate_value(value: str) -> Decimal:
         raise argparse.ArgumentTypeError("年率は数値で入力してください。") from error
     if not result.is_finite():
         raise argparse.ArgumentTypeError("年率は有限の数値で入力してください。")
+    if not JCB_MIN_ANNUAL_RATE <= result <= JCB_MAX_ANNUAL_RATE:
+        raise argparse.ArgumentTypeError(
+            f"JCBの年率は{JCB_MIN_ANNUAL_RATE}%～{JCB_MAX_ANNUAL_RATE}%で入力してください。"
+        )
     return result
 
 
@@ -420,12 +427,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
 
         annual_rate = args.annual_rate
-        if card == JCB_CARD and annual_rate is None:
-            rate_text = input(
-                f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: "
-            ).strip()
-            if rate_text:
-                annual_rate = annual_rate_value(rate_text)
+        if card == JCB_CARD:
+            annual_rate = args.annual_rate or annual_rate_value(
+                input(
+                    f"実質年率（%） [{JCB_DEFAULT_ANNUAL_RATE}]: "
+                ).strip()
+                or str(JCB_DEFAULT_ANNUAL_RATE)
+            )
 
         payments = simulate(
             amount,

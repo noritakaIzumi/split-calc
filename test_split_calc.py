@@ -198,7 +198,9 @@ class MainTest(unittest.TestCase):
             exit_code = main([])
 
         self.assertEqual(exit_code, 0)
-        simulate_mock.assert_called_once_with(100_000, 10, None, "jcb", None)
+        simulate_mock.assert_called_once_with(
+            100_000, 10, None, "jcb", Decimal("15.00")
+        )
 
     def test_keyboard_interrupt_exits_without_traceback(self):
         output = StringIO()
