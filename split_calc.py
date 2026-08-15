@@ -36,6 +36,7 @@ class CardPlan:
     rates: dict[int, Rate]
     note: str
     default_annual_rate: Decimal | None = None
+    arbitrary_installments: bool = False
 
 
 @dataclass(frozen=True)
@@ -87,6 +88,7 @@ class OptimizationResult:
 
 SMBC_CARD = "smbc"
 JCB_CARD = "jcb"
+INTEREST_FREE = "interest-free"
 DEFAULT_CARD = SMBC_CARD
 
 
@@ -157,6 +159,13 @@ CARD_PLANS: dict[str, CardPlan] = {
         "指定年率、15日締め翌月10日払いとして計算しています。実際の請求とは異なる場合があります。",
         default_annual_rate=JCB_DEFAULT_ANNUAL_RATE,
     ),
+    INTEREST_FREE: CardPlan(
+        "無利子",
+        {},
+        "手数料なしで元金を均等に返済し、1円未満の端数は初回に加えます。",
+        default_annual_rate=Decimal("0"),
+        arbitrary_installments=True,
+    ),
 }
 
 
@@ -174,7 +183,12 @@ class InstallmentCalculator(ABC):
         annual_rate: Decimal | None = None,
     ) -> list[Payment]:
         """入力を検証し、カード会社固有の月別支払予定を返す。"""
-        if installments not in self.plan.rates:
+        if installments <= 0:
+            raise ValueError("分割回数は1回以上で入力してください。")
+        if (
+            not self.plan.arbitrary_installments
+            and installments not in self.plan.rates
+        ):
             choices = ", ".join(str(value) for value in self.plan.rates)
             raise ValueError(f"分割回数は次から選んでください: {choices}")
         if annual_rate is None:
@@ -319,9 +333,42 @@ class JcbInstallmentCalculator(InstallmentCalculator):
         return result
 
 
+class InterestFreeInstallmentCalculator(InstallmentCalculator):
+    """奨学金など、手数料のない均等返済を計算する。"""
+
+    def _calculate(
+        self,
+        amount: int,
+        installments: int,
+        start_month: date,
+        annual_rate: Decimal | None,
+    ) -> list[Payment]:
+        if annual_rate not in {None, Decimal("0")}:
+            raise ValueError("無利子の支払いでは年率を指定できません。")
+
+        regular_principal, first_remainder = divmod(amount, installments)
+        balance = amount
+        result: list[Payment] = []
+        for number in range(1, installments + 1):
+            principal = regular_principal + (first_remainder if number == 1 else 0)
+            balance -= principal
+            result.append(
+                Payment(
+                    number,
+                    add_months(start_month, number).strftime("%Y-%m"),
+                    principal,
+                    principal,
+                    0,
+                    balance,
+                )
+            )
+        return result
+
+
 CALCULATORS: dict[str, InstallmentCalculator] = {
     SMBC_CARD: SmbcInstallmentCalculator(CARD_PLANS[SMBC_CARD]),
     JCB_CARD: JcbInstallmentCalculator(CARD_PLANS[JCB_CARD]),
+    INTEREST_FREE: InterestFreeInstallmentCalculator(CARD_PLANS[INTEREST_FREE]),
 }
 
 
@@ -672,7 +719,11 @@ def print_result(
     annual_rate: Decimal | None = None,
 ) -> None:
     plan = CARD_PLANS[card]
-    displayed_annual_rate = annual_rate or plan.rates[installments].annual_rate
+    displayed_annual_rate = annual_rate
+    if displayed_annual_rate is None:
+        displayed_annual_rate = plan.default_annual_rate
+    if displayed_annual_rate is None:
+        displayed_annual_rate = plan.rates[installments].annual_rate
     total_fee = sum(item.fee for item in payments)
     print(f"\n{plan.name} あとから分割シミュレーション")
     print(f"利用金額: {yen(amount)} / {installments}回 / 実質年率: {displayed_annual_rate}%")
@@ -752,7 +803,10 @@ def payment_plan_value(value: str) -> PaymentPlan:
             "支払金額は1,000円以上で入力してください。"
         )
     installments = positive_integer(installments_text)
-    if installments not in CARD_PLANS[card].rates:
+    if (
+        not CARD_PLANS[card].arbitrary_installments
+        and installments not in CARD_PLANS[card].rates
+    ):
         choices = ", ".join(str(item) for item in CARD_PLANS[card].rates)
         raise argparse.ArgumentTypeError(
             f"分割回数は次から選んでください: {choices}"
@@ -955,7 +1009,10 @@ def input_payment_plans() -> tuple[list[PaymentPlan], int, date | None]:
 
                 def installments_value(value: str) -> int:
                     installments = positive_integer(value)
-                    if installments not in CARD_PLANS[card].rates:
+                    if (
+                        not CARD_PLANS[card].arbitrary_installments
+                        and installments not in CARD_PLANS[card].rates
+                    ):
                         choices = ", ".join(
                             str(item) for item in CARD_PLANS[card].rates
                         )

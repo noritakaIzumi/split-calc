@@ -8,6 +8,7 @@ from unittest.mock import patch
 from split_calc import (
     CALCULATORS,
     CARD_PLANS,
+    InterestFreeInstallmentCalculator,
     InstallmentCalculator,
     JcbInstallmentCalculator,
     OptimizationResult,
@@ -30,6 +31,9 @@ class SimulateTest(unittest.TestCase):
     def test_each_card_uses_installment_calculator_interface(self):
         self.assertIsInstance(CALCULATORS["smbc"], SmbcInstallmentCalculator)
         self.assertIsInstance(CALCULATORS["jcb"], JcbInstallmentCalculator)
+        self.assertIsInstance(
+            CALCULATORS["interest-free"], InterestFreeInstallmentCalculator
+        )
         self.assertTrue(
             all(
                 isinstance(calculator, InstallmentCalculator)
@@ -135,6 +139,19 @@ class SimulateTest(unittest.TestCase):
     def test_rejects_annual_rate_for_smbc(self):
         with self.assertRaisesRegex(ValueError, "JCBでのみ"):
             simulate(100_000, 10, annual_rate=Decimal("15.00"))
+
+    def test_interest_free_supports_arbitrary_installments(self):
+        payments = simulate(
+            1_000_000, 180, date(2026, 8, 1), card="interest-free"
+        )
+
+        self.assertEqual(len(payments), 180)
+        self.assertEqual(payments[0].month, "2026-09")
+        self.assertEqual(payments[0].amount, 5_655)
+        self.assertEqual(payments[1].amount, 5_555)
+        self.assertEqual(sum(payment.principal for payment in payments), 1_000_000)
+        self.assertEqual(sum(payment.fee for payment in payments), 0)
+        self.assertEqual(payments[-1].balance, 0)
 
 
 class OptimizePayoffsTest(unittest.TestCase):
@@ -326,6 +343,15 @@ class OptimizePayoffsTest(unittest.TestCase):
         self.assertEqual(plan.annual_rate, Decimal("18.00"))
         self.assertEqual(plan.start_month, date(2026, 8, 1))
 
+    def test_parses_interest_free_payment_with_arbitrary_installments(self):
+        plan = payment_plan_value(
+            "奨学金:interest-free:2400000:180::2026-08"
+        )
+
+        self.assertEqual(plan.card, "interest-free")
+        self.assertEqual(plan.installments, 180)
+        self.assertIsNone(plan.annual_rate)
+
 
 class MainTest(unittest.TestCase):
     def test_fixed_monthly_total_option_is_passed_to_optimizer(self):
@@ -405,7 +431,8 @@ class MainTest(unittest.TestCase):
         self.assertEqual(exit_code, 2)
         self.assertEqual(
             output.getvalue(),
-            "エラー: カード会社は次から選んでください: smbc, jcb\n",
+            "エラー: カード会社は次から選んでください: "
+            "smbc, jcb, interest-free\n",
         )
 
     def test_interactive_jcb_annual_rate_defaults_on_empty_input(self):
