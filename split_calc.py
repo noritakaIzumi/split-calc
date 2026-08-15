@@ -355,11 +355,13 @@ def optimize_payoffs(
     plans: Sequence[PaymentPlan],
     monthly_saving: int,
     saving_start: date | None = None,
+    fixed_monthly_total: bool = False,
 ) -> OptimizationResult:
     """毎月の積立で一括返済する順序を総手数料が最小になるよう選ぶ。
 
     各月の積立後に対象の残元金を払える場合は一括返済し、足りない場合は
-    その月の通常支払いを行った後にも再判定する。通常支払いは積立とは別枠。
+    その月の通常支払いを行った後にも再判定する。fixed_monthly_total が真なら、
+    通常支払いと積立の合計が monthly_saving になるよう積立額を調整する。
     """
     if not plans:
         raise ValueError("支払いを1件以上指定してください。")
@@ -392,6 +394,7 @@ def optimize_payoffs(
     best_fee: int | None = None
     best_payoffs: tuple[Payoff, ...] = ()
     best_saving_entries: tuple[SavingEntry, ...] = ()
+    excessive_month: str | None = None
     # 同一状態へより高い手数料で到達した枝は、その後も逆転できない。
     lowest_fee_by_state: dict[tuple[object, ...], int] = {}
 
@@ -408,6 +411,7 @@ def optimize_payoffs(
         saving_entries: tuple[SavingEntry, ...],
     ) -> None:
         nonlocal best_order, best_fee, best_payoffs, best_saving_entries
+        nonlocal excessive_month
 
         # 将来の手数料は負にならないため、ここまでで最良値以上なら枝刈りできる。
         if best_fee is not None and incurred_fee >= best_fee:
@@ -465,6 +469,14 @@ def optimize_payoffs(
                         next_fee += payment.fee
                         next_positions[index] += 1
                         regular_payments[index] = payment.amount
+                    regular_total = sum(regular_payments)
+                    if (
+                        fixed_monthly_total
+                        and next_current >= first_saving_month
+                        and regular_total > monthly_saving
+                    ):
+                        excessive_month = month
+                        return
                     for entry_index in range(
                         len(next_saving_entries) - 1, -1, -1
                     ):
@@ -473,6 +485,12 @@ def optimize_payoffs(
                             "積立",
                             "積立開始前",
                         }:
+                            deposit = entry.deposit
+                            balance = entry.balance
+                            if fixed_monthly_total and entry.description == "積立":
+                                deposit -= regular_total
+                                balance -= regular_total
+                                next_fund -= regular_total
                             next_saving_entries = (
                                 next_saving_entries[:entry_index]
                                 + (
@@ -480,9 +498,9 @@ def optimize_payoffs(
                                         entry.number,
                                         entry.month,
                                         entry.description,
-                                        entry.deposit,
+                                        deposit,
                                         entry.withdrawal,
-                                        entry.balance,
+                                        balance,
                                         tuple(regular_payments),
                                     ),
                                 )
@@ -604,7 +622,12 @@ def optimize_payoffs(
             ),
         ),
     )
-    assert best_order is not None and best_fee is not None
+    if best_order is None or best_fee is None:
+        if excessive_month is not None:
+            raise ValueError(
+                f"{excessive_month} の通常返済額が毎月の合計額を超えています。"
+            )
+        raise RuntimeError("返済順を決定できませんでした。")
     return OptimizationResult(
         tuple(plans[index].name for index in best_order),
         baseline_fee,
@@ -745,9 +768,14 @@ def payment_plan_value(value: str) -> PaymentPlan:
     return PaymentPlan(name, amount, installments, start, card, rate)
 
 
-def print_optimization(result: OptimizationResult, monthly_saving: int) -> None:
+def print_optimization(
+    result: OptimizationResult,
+    monthly_saving: int,
+    fixed_monthly_total: bool = False,
+) -> None:
     print("\n繰り上げ返済の最適化（概算）")
-    print(f"毎月の積立額: {yen(monthly_saving)}")
+    label = "毎月の返済・積立合計額" if fixed_monthly_total else "毎月の積立額"
+    print(f"{label}: {yen(monthly_saving)}")
     if result.saving_start_month is not None:
         print(f"積立開始月: {result.saving_start_month}")
     print(f"推奨順序: {' → '.join(result.order)}")
@@ -807,7 +835,10 @@ def print_optimization(result: OptimizationResult, monthly_saving: int) -> None:
                     for i in range(len(row))
                 )
             )
-    print("\n※通常支払いとは別に積み立て、残元金を一括返済できる月で比較した概算です。")
+    if fixed_monthly_total:
+        print("\n※通常支払いとの差額を積み立て、毎月の返済・積立合計額を一定にした概算です。")
+    else:
+        print("\n※通常支払いとは別に積み立て、残元金を一括返済できる月で比較した概算です。")
     print("※実際の精算額・手数料はカード会社に確認してください。")
 
 
@@ -1022,6 +1053,11 @@ def build_parser() -> argparse.ArgumentParser:
         metavar="YYYY-MM",
         help="積立開始月（既定: 最初の支払月）",
     )
+    parser.add_argument(
+        "--fixed-monthly-total",
+        action="store_true",
+        help="--monthly-saving の額を返済と積立の毎月の合計額として扱う",
+    )
     return parser
 
 
@@ -1044,8 +1080,14 @@ def main(argv: Sequence[str] | None = None) -> int:
             ):
                 raise ValueError("--optimize は他の入力オプションと同時に指定できません。")
             plans, monthly_saving, saving_start = input_payment_plans()
-            result = optimize_payoffs(plans, monthly_saving, saving_start)
-            print_optimization(result, monthly_saving)
+            if args.fixed_monthly_total:
+                result = optimize_payoffs(
+                    plans, monthly_saving, saving_start, fixed_monthly_total=True
+                )
+                print_optimization(result, monthly_saving, fixed_monthly_total=True)
+            else:
+                result = optimize_payoffs(plans, monthly_saving, saving_start)
+                print_optimization(result, monthly_saving)
             return 0
         if args.payment:
             if args.monthly_saving is None:
@@ -1063,14 +1105,30 @@ def main(argv: Sequence[str] | None = None) -> int:
                 raise ValueError(
                     "最適化では位置引数および --card、--annual-rate、--start を指定できません。"
                 )
-            result = optimize_payoffs(
-                args.payment, args.monthly_saving, args.saving_start
-            )
-            print_optimization(result, args.monthly_saving)
+            if args.fixed_monthly_total:
+                result = optimize_payoffs(
+                    args.payment,
+                    args.monthly_saving,
+                    args.saving_start,
+                    fixed_monthly_total=True,
+                )
+                print_optimization(
+                    result, args.monthly_saving, fixed_monthly_total=True
+                )
+            else:
+                result = optimize_payoffs(
+                    args.payment, args.monthly_saving, args.saving_start
+                )
+                print_optimization(result, args.monthly_saving)
             return 0
-        if args.monthly_saving is not None or args.saving_start is not None:
+        if (
+            args.monthly_saving is not None
+            or args.saving_start is not None
+            or args.fixed_monthly_total
+        ):
             raise ValueError(
-                "--monthly-saving と --saving-start には --payment が必要です。"
+                "--monthly-saving、--saving-start、--fixed-monthly-total には "
+                "--payment または --optimize が必要です。"
             )
         amount = args.amount or positive_integer(input("支払金額（円）: ").strip())
         installments = args.installments or positive_integer(input("分割回数: ").strip())

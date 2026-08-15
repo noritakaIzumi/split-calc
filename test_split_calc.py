@@ -251,6 +251,39 @@ class OptimizePayoffsTest(unittest.TestCase):
         self.assertEqual(result.saving_entries[0].regular_payments, (30,))
         self.assertEqual(result.saving_entries[1].regular_payments, (28,))
 
+    def test_fixed_monthly_total_reduces_deposit_by_regular_payments(self):
+        plan = PaymentPlan("家電", 100, 3, date(2026, 8, 1))
+        schedule = [
+            Payment(1, "2026-09", 30, 20, 10, 80),
+            Payment(2, "2026-10", 28, 20, 8, 60),
+            Payment(3, "2026-11", 66, 60, 6, 0),
+        ]
+
+        with patch("split_calc.simulate", return_value=schedule):
+            result = optimize_payoffs([plan], 100, fixed_monthly_total=True)
+
+        saving_entries = [
+            entry for entry in result.saving_entries if entry.description == "積立"
+        ]
+        self.assertEqual(
+            [
+                (sum(entry.regular_payments), entry.deposit)
+                for entry in saving_entries
+            ],
+            [(30, 70), (28, 72)],
+        )
+        self.assertTrue(
+            all(sum(entry.regular_payments) + entry.deposit == 100 for entry in saving_entries)
+        )
+
+    def test_fixed_monthly_total_rejects_unavoidable_excess_payment(self):
+        plan = PaymentPlan("家電", 100, 2, date(2026, 8, 1))
+        schedule = [Payment(1, "2026-09", 70, 50, 20, 50)]
+
+        with patch("split_calc.simulate", return_value=schedule):
+            with self.assertRaisesRegex(ValueError, "2026-09"):
+                optimize_payoffs([plan], 60, fixed_monthly_total=True)
+
     def test_rejects_duplicate_names(self):
         plans = [
             PaymentPlan("同じ", 10_000, 3, date(2026, 8, 1)),
@@ -295,6 +328,27 @@ class OptimizePayoffsTest(unittest.TestCase):
 
 
 class MainTest(unittest.TestCase):
+    def test_fixed_monthly_total_option_is_passed_to_optimizer(self):
+        result = OptimizationResult(("家電",), 1_000, 500, ())
+
+        with (
+            patch("split_calc.optimize_payoffs", return_value=result) as optimize_mock,
+            patch("split_calc.print_optimization") as print_mock,
+        ):
+            exit_code = main(
+                [
+                    "--payment",
+                    "家電:smbc:10000:3::2026-08",
+                    "--monthly-saving",
+                    "10000",
+                    "--fixed-monthly-total",
+                ]
+            )
+
+        self.assertEqual(exit_code, 0)
+        self.assertTrue(optimize_mock.call_args.kwargs["fixed_monthly_total"])
+        self.assertTrue(print_mock.call_args.kwargs["fixed_monthly_total"])
+
     def test_result_columns_have_equal_display_widths(self):
         payments = simulate(650_000, 60, date(2026, 8, 1))
         output = StringIO()
